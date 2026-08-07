@@ -106,7 +106,111 @@ console.log('cheapai e2e\n');
   }
 }
 
-// 4) device endpoints shape
+// 4) terminal rendering primitives
+{
+  const { displayWidth, panel, statusBar, stripAnsi, wrapAnsi } = await import('../src/ui/draw.js');
+  const wrapped = wrapAnsi('abcdefghij', 4);
+  if (wrapped.join('') !== 'abcdefghij' || wrapped.some((line) => displayWidth(line) > 4)) {
+    bad('terminal wrapping', new Error(JSON.stringify(wrapped)));
+  } else ok('terminal wrapping');
+
+  if (displayWidth('한글') !== 4) bad('terminal CJK width', new Error('unexpected width'));
+  else ok('terminal CJK width');
+
+  if (displayWidth('😀') !== 2) bad('terminal emoji width', new Error('unexpected width'));
+  else ok('terminal emoji width');
+
+  const spaced = wrapAnsi('abcd ef', 4);
+  if (spaced.join('') !== 'abcd ef' || spaced.some((line) => displayWidth(line) > 4)) {
+    bad('terminal space wrapping', new Error(JSON.stringify(spaced)));
+  } else ok('terminal space wrapping');
+
+  const columnsDescriptor = Object.getOwnPropertyDescriptor(process.stdout, 'columns');
+  try {
+    let overflow = null;
+    for (const columns of [20, 40, 80]) {
+      Object.defineProperty(process.stdout, 'columns', { value: columns, configurable: true });
+      const blocks = [
+        panel('connect with browser', ['https://cheapai.im/a/very/long/device/url']),
+        statusBar({
+          model: 'a-very-long-model-name-for-layout-testing',
+          mode: 'accept-edits',
+          effort: 'medium',
+          cwd: path.join(root, 'a-very-long-workspace-name-for-layout-testing'),
+          session: '12345678-1234-1234-1234-123456789abc',
+        }),
+      ];
+      overflow = blocks
+        .flatMap((block) => stripAnsi(block).split('\n'))
+        .find((line) => displayWidth(line) > columns);
+      if (overflow) break;
+    }
+    if (overflow) bad('responsive terminal layouts', new Error(overflow));
+    else ok('responsive terminal layouts (20/40/80 cols)');
+  } finally {
+    if (columnsDescriptor) Object.defineProperty(process.stdout, 'columns', columnsDescriptor);
+    else delete process.stdout.columns;
+  }
+}
+
+// 5) menu fallback safety
+{
+  const { resolveMenuAnswer } = await import('../src/ui/select.js');
+  const options = [
+    { label: 'Allow once', action: 'once', aliases: ['y', 'yes'] },
+    { label: 'Reject', action: 'reject', aliases: ['n', 'no'] },
+  ];
+  if (resolveMenuAnswer(options, 'n')?.action !== 'reject' || resolveMenuAnswer(options, 'invalid') !== null) {
+    bad('menu fallback safety', new Error('unsafe fallback selection'));
+  } else ok('menu fallback safety');
+}
+
+// 6) permission policies
+{
+  const { createPermissionGate } = await import('../src/agent/permissions.js');
+  const ask = createPermissionGate('ask');
+  const edits = createPermissionGate('accept-edits');
+  if (ask.requiresApproval('read_file') || !ask.requiresApproval('bash')) {
+    bad('permission ask policy', new Error('unexpected approval policy'));
+  } else ok('permission ask policy');
+  if (edits.requiresApproval('edit_file') || !edits.requiresApproval('bash')) {
+    bad('permission edit policy', new Error('unexpected approval policy'));
+  } else ok('permission edit policy');
+}
+
+// 7) full-screen TUI frame
+{
+  const { displayWidth } = await import('../src/ui/draw.js');
+  const { createFullscreenChatUi } = await import('../src/ui/fullscreen.js');
+  const ui = createFullscreenChatUi({
+    model: 'claude-sonnet-5',
+    mode: 'ask',
+    effort: 'off',
+    cwd: root,
+    sessionId: '12345678-1234-1234-1234-123456789abc',
+  });
+  for (const [columns, rows] of [[10, 8], [40, 16], [80, 24], [120, 36]]) {
+    const frame = ui.renderSnapshot(columns, rows);
+    const lines = frame.split('\n');
+    if (lines.length !== rows || lines.some((line) => displayWidth(line) > columns)) {
+      bad(`fullscreen frame ${columns}x${rows}`, new Error('frame dimensions exceeded'));
+    } else if (columns >= 20 && (!frame.includes('Ask anything') || !frame.includes('ready'))) {
+      bad(`fullscreen frame ${columns}x${rows}`, new Error('missing composer or status'));
+    } else ok(`fullscreen frame ${columns}x${rows}`);
+  }
+
+  ui.resetSession('87654321', 'Resumed work', '', [
+    { role: 'system', content: 'system' },
+    { role: 'user', content: 'Previous question' },
+    { role: 'assistant', content: 'Previous answer' },
+  ]);
+  const resumed = ui.renderSnapshot(80, 24);
+  if (!resumed.includes('Previous question') || !resumed.includes('Previous answer')) {
+    bad('fullscreen session hydration', new Error('resumed messages missing'));
+  } else ok('fullscreen session hydration');
+}
+
+// 8) device endpoints shape
 if (process.argv.includes('--poll-shape') || process.argv.includes('--live')) {
   try {
     const { startDeviceAuth, pollDeviceAuth } = await import('../src/auth.js');
@@ -120,7 +224,7 @@ if (process.argv.includes('--poll-shape') || process.argv.includes('--live')) {
   }
 }
 
-// 5) live LLM + tools (optional)
+// 9) live LLM + tools (optional)
 if (process.argv.includes('--live')) {
   try {
     const { createClient, chatWithTools } = await import('../src/llm/client.js');

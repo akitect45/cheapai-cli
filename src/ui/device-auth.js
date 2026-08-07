@@ -1,7 +1,5 @@
-import readline from 'node:readline/promises';
-import { stdin as input, stdout as output } from 'node:process';
 import { t, icons } from './theme.js';
-import { clearScreen, panel, hr } from './draw.js';
+import { clearScreen, panel } from './draw.js';
 import {
   startDeviceAuth,
   pollDeviceAuth,
@@ -9,9 +7,10 @@ import {
   loginWithApiKey,
 } from '../auth.js';
 import { loadConfig, DEFAULT_WEB_ORIGIN } from '../config.js';
+import { readSecret } from './input.js';
 
 /**
- * Browser device-code login (Grok-like).
+ * Browser device-code login.
  * Polls until approved; resilient to varied server JSON shapes.
  */
 export async function runBrowserAuthFlow({ webOrigin } = {}) {
@@ -23,8 +22,6 @@ export async function runBrowserAuthFlow({ webOrigin } = {}) {
   console.log('');
   console.log(t.bold(t.accent('  Connect CheapAI CLI')));
   console.log(t.dim('  Log in with your browser, then return here.'));
-  console.log('');
-  console.log(hr('·'));
   console.log('');
 
   let device;
@@ -47,23 +44,21 @@ export async function runBrowserAuthFlow({ webOrigin } = {}) {
   const expiresIn = Number(device.expires_in) || 900;
 
   console.log(
-    panel('browser login', [
-      t.agent('  CheapAI CLI에 연결합니다'),
-      t.dim('  브라우저에서 로그인·승인한 뒤 이 화면이 자동으로 완료됩니다.'),
+    panel('connect with browser', [
+      t.agent('Approve this terminal in your browser.'),
       '',
-      t.dim('  verification url'),
-      '  ' + t.cyan(verifyUrl),
+      t.dim('verification URL'),
+      t.cyan(verifyUrl),
       '',
-      t.dim('  your code'),
-      '  ' + t.bold(t.accent(formatCode(userCode))),
+      t.dim('verification code'),
+      t.bold(t.accent(formatCode(userCode))),
       '',
-      t.dim(`  expires ~${Math.round(expiresIn / 60)} min · poll every ${intervalSec}s`),
-      t.dim('  debug: set CHEAPAI_DEBUG=1'),
+      t.dim(`expires in about ${Math.round(expiresIn / 60)} minutes`),
     ]),
   );
   console.log('');
   console.log(t.dim(`  ${icons.globe} Opening browser…`));
-  console.log(t.dim(`  (already signed in? use plain \`cheapai\` — browser only for this flow)`));
+  console.log(t.dim('  If it does not open, use the URL above.'));
   openBrowser(verifyUrl);
   console.log('');
   console.log(t.dim('  Waiting for approval  (Ctrl+C to cancel)'));
@@ -110,7 +105,7 @@ export async function runBrowserAuthFlow({ webOrigin } = {}) {
       dots = (dots + 1) % 4;
       const elapsed = Math.round((Date.now() - started) / 1000);
       process.stdout.write(
-        `\r  ${t.yellow('◐◓◑◒'[dots])} ${t.dim(`waiting… ${status} · ${elapsed}s · poll #${pollCount}`)}   `,
+        `\r  ${t.yellow('◐◓◑◒'[dots])} ${t.dim(`Waiting for approval · ${elapsed}s`)}   `,
       );
 
       if (status === 'pending') {
@@ -151,13 +146,13 @@ export async function runBrowserAuthFlow({ webOrigin } = {}) {
           });
           console.log(t.green(`  ${icons.check} Connected to CheapAI CLI`));
           console.log(t.dim(`  signed in as ${auth.username || 'api-key'}`));
-          console.log(t.dim(`  key ${auth.apiKey.slice(0, 10)}…`));
+          console.log(t.dim('  credentials stored securely in your local config'));
           console.log('');
           await sleep(400);
           return auth;
         } catch (e) {
           console.log(t.red(`  키 저장 실패: ${e.message}`));
-          console.log(t.dim('  받은 키 미리보기: ' + String(key).slice(0, 12) + '…'));
+          console.log(t.dim('  the credential was not written to the local config'));
           throw e;
         }
       }
@@ -199,16 +194,11 @@ async function fallbackWithPaste(origin) {
     ]),
   );
   openBrowser(`${origin}/api/dashboard`);
-  const rl = readline.createInterface({ input, output });
-  try {
-    const key = (await rl.question(t.accent(`\n  ${icons.key} API key: `))).trim();
-    if (!key) throw new Error('API 키가 비어 있습니다.');
-    const auth = await loginWithApiKey(key, { keyName: 'CheapAI CLI (paste)' });
-    console.log(t.green(`\n  ${icons.check} Connected`));
-    return auth;
-  } finally {
-    rl.close();
-  }
+  const key = await readSecret(t.accent(`\n  ${icons.key} API key  `));
+  if (!key) throw new Error('API 키가 비어 있습니다.');
+  const auth = await loginWithApiKey(key, { keyName: 'CheapAI CLI (paste)' });
+  console.log(t.green(`\n  ${icons.check} Connected`));
+  return auth;
 }
 
 export async function runApiKeyAuthFlow() {
@@ -221,17 +211,12 @@ export async function runApiKeyAuthFlow() {
   console.log(t.dim(`  create one at ${origin}/api/dashboard`));
   console.log('');
 
-  const rl = readline.createInterface({ input, output });
-  try {
-    const key = (await rl.question(t.accent(`  ${icons.key} `))).trim();
-    if (!key) throw new Error('API 키가 비어 있습니다.');
-    const auth = await loginWithApiKey(key, { keyName: 'CheapAI CLI (api-key)' });
-    console.log(t.green(`\n  ${icons.check} Authenticated`));
-    console.log('');
-    return auth;
-  } finally {
-    rl.close();
-  }
+  const key = await readSecret(t.accent(`  ${icons.key} API key  `));
+  if (!key) throw new Error('API 키가 비어 있습니다.');
+  const auth = await loginWithApiKey(key, { keyName: 'CheapAI CLI (api-key)' });
+  console.log(t.green(`\n  ${icons.check} Authenticated`));
+  console.log('');
+  return auth;
 }
 
 function sleep(ms) {

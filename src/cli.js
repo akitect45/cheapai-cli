@@ -148,7 +148,7 @@ async function enterChat({ prompt, opts }) {
 }
 
 /**
- * Grok-like boot:
+ * Direct-to-workspace boot:
  * - signed in  → chat immediately (no welcome, no browser)
  * - not signed → auth picker only, then chat
  */
@@ -163,20 +163,25 @@ async function boot({ prompt, opts }) {
     return;
   }
 
-  if (!process.stdin.isTTY) {
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
     if (!resolveApiKey()) {
       console.error('not a TTY and no API key');
       process.exitCode = 1;
       return;
     }
-    await startChatTui({ prompt, opts, print: false });
+    if (!prompt && process.stdin.isTTY) {
+      console.error('interactive input requires a TTY stdout; pass a prompt or use --print');
+      process.exitCode = 1;
+      return;
+    }
+    await startChatTui({ prompt, opts, print: true });
     return;
   }
 
   try {
     restoreTty();
 
-    // Already signed in → straight to chat (Grok behavior)
+    // Already signed in -> straight to chat.
     if (resolveApiKey() && !opts.login) {
       await enterChat({ prompt, opts });
       return;

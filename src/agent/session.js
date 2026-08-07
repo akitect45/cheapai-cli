@@ -74,6 +74,24 @@ export function findLatestSession(cwd) {
   return files[0]?.data || null;
 }
 
+export function listSessions(cwd) {
+  const dir = sessionsDir();
+  if (!fs.existsSync(dir)) return [];
+  const target = path.resolve(cwd);
+  return fs
+    .readdirSync(dir)
+    .filter((file) => file.endsWith('.json') && file !== 'index.jsonl')
+    .map((file) => {
+      try {
+        return JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
+      } catch {
+        return null;
+      }
+    })
+    .filter((session) => session && path.resolve(session.cwd || '') === target)
+    .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
+}
+
 export function createSession({ cwd, model, systemPrompt }) {
   return {
     id: newSessionId(),

@@ -1,28 +1,32 @@
-/** Grok Build–inspired terminal theme (dark, compact, tool cards) */
+/** Semantic terminal theme inspired by focused, editorial coding tools. */
+
+const colorEnabled = process.stdout.isTTY === true && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
+const style = (code, value) => colorEnabled ? `\x1b[${code}m${value}\x1b[0m` : String(value);
 
 export const t = {
-  reset: '\x1b[0m',
-  bold: (s) => `\x1b[1m${s}\x1b[0m`,
-  dim: (s) => `\x1b[2m${s}\x1b[0m`,
-  italic: (s) => `\x1b[3m${s}\x1b[0m`,
+  reset: colorEnabled ? '\x1b[0m' : '',
+  bold: (s) => style('1', s),
+  dim: (s) => style('2', s),
+  italic: (s) => style('3', s),
+  inverse: (s) => style('7', s),
   // accents
-  cyan: (s) => `\x1b[36m${s}\x1b[0m`,
-  green: (s) => `\x1b[32m${s}\x1b[0m`,
-  yellow: (s) => `\x1b[33m${s}\x1b[0m`,
-  red: (s) => `\x1b[31m${s}\x1b[0m`,
-  magenta: (s) => `\x1b[35m${s}\x1b[0m`,
-  blue: (s) => `\x1b[34m${s}\x1b[0m`,
-  white: (s) => `\x1b[97m${s}\x1b[0m`,
+  cyan: (s) => style('36', s),
+  green: (s) => style('32', s),
+  yellow: (s) => style('33', s),
+  red: (s) => style('31', s),
+  magenta: (s) => style('35', s),
+  blue: (s) => style('34', s),
+  white: (s) => style('97', s),
   // alias used by select menu
-  bright: (s) => `\x1b[97m${s}\x1b[0m`,
-  gray: (s) => `\x1b[90m${s}\x1b[0m`,
-  // grok-ish warm accent (xAI green-ish on many themes)
-  accent: (s) => `\x1b[38;5;114m${s}\x1b[0m`,
-  accent2: (s) => `\x1b[38;5;80m${s}\x1b[0m`,
-  border: (s) => `\x1b[38;5;240m${s}\x1b[0m`,
-  user: (s) => `\x1b[38;5;117m${s}\x1b[0m`,
-  agent: (s) => `\x1b[38;5;252m${s}\x1b[0m`,
-  tool: (s) => `\x1b[38;5;178m${s}\x1b[0m`,
+  bright: (s) => style('97', s),
+  gray: (s) => style('90', s),
+  // Warm primary plus cool tool metadata, close to modern coding TUIs.
+  accent: (s) => style('38;5;216', s),
+  accent2: (s) => style('38;5;117', s),
+  border: (s) => style('38;5;238', s),
+  user: (s) => style('38;5;216', s),
+  agent: (s) => style('38;5;252', s),
+  tool: (s) => style('38;5;110', s),
 };
 
 export const icons = {
@@ -30,14 +34,15 @@ export const icons = {
   spin: '◐◓◑◒',
   check: '✓',
   cross: '✗',
+  pending: '○',
   arrow: '❯',
   gear: '⚙',
   spark: '✦',
   branch: '⎇',
-  lock: '🔒',
-  key: '🔑',
-  globe: '🌐',
-  chat: '💬',
+  lock: '▣',
+  key: '◆',
+  globe: '◎',
+  chat: '◇',
 };
 
 export const VERSION = '0.3.0';

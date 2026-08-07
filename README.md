@@ -1,6 +1,6 @@
 # CheapAI Agent CLI (`cheapai`)
 
-Grok Build 스타일 **TUI** + 코딩 에이전트 루프.  
+OpenCode에서 영감을 받은 키보드 중심 **TUI** + 코딩 에이전트 루프.
 API: `https://api.cheapai.im/v1`
 
 - 설계: [docs/AGENT_SYSTEMS.md](./docs/AGENT_SYSTEMS.md)
@@ -20,24 +20,31 @@ npm link
 cheapai
 ```
 
-1. **Welcome** — 로고 / 버전 / base URL  
+1. **Welcome** — 간결한 로고 / 버전 / 연결 상태
 2. 미로그인 → **Browser** 또는 **API key**  
 3. Browser → device code + `https://cheapai.im/cli/authorize`  
 4. 승인 완료 → **Chat TUI**
 
 ```text
-  cheapai │ claude-sonnet-5 │ ask │ ~/project
-  ────────────────────────────────────────
-  ✦ Ready. Ask anything about this workspace.
+  ◆ cheapai / project                          claude-sonnet-5  ask for writes
+  session 8f3a2c                                      ● ready  effort off
+  ────────────────────────────────────────────────────────────────────────────
 
-  ╭ you
-  │ fix the bug
+                         What do you want to build?
+              Describe a task, ask about the codebase, or type /help.
 
-  ● thinking · turn 1…
-  ╭─ ⚙ bash ──
-  │ npm test
-  ╰─ done
-  ✦ cheapai
+  ╭──────────────────────────────────────────────────────────────────────────╮
+  │ Ask anything…                                                            │
+  │                                                                          │
+  ╰──────────────────────────────────────────────────────────────────────────╯
+  build  claude-sonnet-5                                        ask for writes
+  Enter send  ·  / commands  ·  PgUp scroll  ·  Ctrl+C exit
+
+  ▌ fix the bug
+
+  ┊ Thinking · turn 1
+  ╰─ ✓ Bash  tests passed
+  ✦
   …
 
   ❯
@@ -64,7 +71,7 @@ cheapai
 cheapai "이 레포 설명해줘"
 cheapai -p "한 번만 실행" --yolo
 cheapai -c
-cheapai --skip-welcome
+cheapai --resume <session-id>
 ```
 
 ### 채팅 슬래시 명령
@@ -78,6 +85,11 @@ cheapai --skip-welcome
 | `/ask` | 도구 확인 |
 | `/accept-edits` | 파일 수정 자동 |
 | `/status` | 세션 정보 |
+| `/sessions` | 저장된 세션 선택 / 재개 |
+| `/model` | 검색 가능한 모델 선택 |
+| `/effort` | 추론 강도 변경 |
+| `/thinking` | 추론 표시 전환 |
+| `/details` | 도구 실행 상세 정보 전환 |
 
 ## 도구
 

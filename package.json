@@ -1,7 +1,7 @@
 {
   "name": "cheapai",
   "version": "0.3.0",
-  "description": "CheapAI coding agent — Grok-style TUI + agent loop on api.cheapai.im",
+  "description": "CheapAI coding agent with a focused terminal workspace",
   "type": "module",
   "bin": {
     "cheapai": "./bin/cheapai.js"

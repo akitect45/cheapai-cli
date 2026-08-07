@@ -1,45 +1,42 @@
-import { t, icons, VERSION } from './theme.js';
-import { clearScreen, bannerLogo, hr } from './draw.js';
+import { t, VERSION } from './theme.js';
+import { termWidth } from './draw.js';
 import { whoami } from '../auth.js';
 import { resolveBaseUrl, loadConfig, loadAuth } from '../config.js';
 import { selectMenu } from './select.js';
 
-/**
- * Auth-only welcome (shown when NOT logged in).
- * Grok: first launch = auth; later launches skip this and go to chat.
- */
+/** Auth-only welcome shown before the first coding session. */
 export async function showAuthWelcome() {
-  clearScreen();
   const cfg = loadConfig();
   const base = resolveBaseUrl(cfg, loadAuth());
-
-  console.log('');
-  console.log(bannerLogo());
-  console.log('');
-  console.log(t.dim(`  CheapAI Agent  v${VERSION}`));
-  console.log(t.dim(`  ${base}`));
-  console.log('');
-  console.log(hr('·'));
-  console.log('');
-  console.log(t.bold('  Sign in to continue'));
-  console.log(t.dim('  Connect this CLI to your CheapAI account.'));
-  console.log('');
+  const logo = termWidth() >= 48
+    ? [
+        `${t.accent('█▀▀ █ █ █▀▀ ▄▀█ █▀█')} ${t.gray('  ▄▀█ █')}`,
+        `${t.accent('█▄▄ █▀█ ██▄ █▀█ █▀▀')} ${t.gray('  █▀█ █')}`,
+      ]
+    : [t.bold(t.accent('cheap')) + t.bold(t.gray('ai'))];
 
   const picked = await selectMenu({
-    title: null,
-    subtitle: null,
+    headerLines: [
+      ...logo,
+      '',
+      t.bold(t.white('Your AI coding workspace')),
+      t.dim(`v${VERSION}  ·  credentials stay on this machine`),
+      t.dim(base),
+    ],
+    centered: true,
+    alternateScreen: true,
     initialIndex: 0,
     options: [
       {
         id: 'login-browser',
-        label: 'Log in with browser',
-        hint: 'device code on cheapai.im',
+        label: 'Continue in browser',
+        hint: 'recommended · device code',
         action: 'login-browser',
       },
       {
         id: 'login-key',
-        label: 'Log in with API key',
-        hint: 'paste csk_…',
+        label: 'Use an API key',
+        hint: 'manual setup',
         action: 'login-key',
       },
       {

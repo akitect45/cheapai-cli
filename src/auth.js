@@ -1,6 +1,7 @@
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
 import { exec } from 'node:child_process';
+import { readSecret } from './ui/input.js';
 import {
   DEFAULT_BASE_URL,
   DEFAULT_WEB_ORIGIN,
@@ -355,28 +356,26 @@ export async function webLogin({ username, password, webOrigin, keyName = 'Cheap
 
 export async function interactiveLogin(opts = {}) {
   if (opts.key || opts.apiKey) {
-    const rl = readline.createInterface({ input, output });
-    try {
-      let key = opts.key || opts.apiKey;
-      if (key === true || key === '-') key = (await rl.question('API 키 (csk_...): ')).trim();
-      return loginWithApiKey(key, { baseUrl: opts.baseUrl });
-    } finally {
-      rl.close();
-    }
+    let key = opts.key || opts.apiKey;
+    if (key === true || key === '-') key = await readSecret('API key  ');
+    return loginWithApiKey(key, { baseUrl: opts.baseUrl });
   }
   if (opts.password || opts.username) {
-    const rl = readline.createInterface({ input, output });
-    try {
-      const username = opts.username || (await rl.question('아이디: ')).trim();
-      const password = opts.password || (await rl.question('비밀번호: '));
-      return webLogin({
-        username,
-        password: String(password).trim(),
-        webOrigin: opts.webOrigin,
-      });
-    } finally {
-      rl.close();
+    let username = opts.username;
+    if (!username) {
+      const rl = readline.createInterface({ input, output });
+      try {
+        username = (await rl.question('Username: ')).trim();
+      } finally {
+        rl.close();
+      }
     }
+    const password = opts.password || (await readSecret('Password  '));
+    return webLogin({
+      username,
+      password: String(password).trim(),
+      webOrigin: opts.webOrigin,
+    });
   }
   const { runBrowserAuthFlow } = await import('./ui/device-auth.js');
   return runBrowserAuthFlow({ webOrigin: opts.webOrigin });
@@ -407,7 +406,6 @@ export function whoami() {
     username: auth?.username || null,
     keyName: auth?.keyName || null,
     baseUrl: resolveBaseUrl(loadConfig(), auth),
-    apiKeyPreview: `${key.slice(0, 10)}…${key.slice(-4)}`,
     createdAt: auth?.createdAt || null,
     source: process.env.CHEAPAI_API_KEY
       ? 'env:CHEAPAI_API_KEY'

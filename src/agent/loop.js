@@ -20,6 +20,8 @@ export async function runAgentLoop({
   showThinking = true,
   print = false,
   alwaysApprove = false,
+  onPermissionModeChange = null,
+  requestPermission = null,
   ui = null,
 }) {
   const cwd = session.cwd || process.cwd();
@@ -34,10 +36,10 @@ export async function runAgentLoop({
       }
     },
   });
-  let gate = createPermissionGate(alwaysApprove ? 'yolo' : permissionMode);
+  let gate = createPermissionGate(alwaysApprove ? 'yolo' : permissionMode, requestPermission);
 
   session.messages.push({ role: 'user', content: userText });
-  if (!session.title) session.title = userText.slice(0, 80);
+  if (!session.title) session.title = sessionTitle(userText);
 
   let finalText = '';
   let totalUsage = { prompt_tokens: 0, completion_tokens: 0 };
@@ -96,17 +98,19 @@ export async function runAgentLoop({
         }
         const detail = runtime.detailFor(name, args);
 
-        if (ui?.onToolStart) ui.onToolStart(name, detail);
-        else if (!print) {
-          console.log(`\x1b[36m\n⚙ ${name}\x1b[0m \x1b[2m${String(detail).slice(0, 120)}\x1b[0m`);
-        }
-
         let allowed = alwaysApprove;
         if (!allowed) {
+          if (gate.requiresApproval(name)) {
+            if (ui?.onToolPending) ui.onToolPending(name, detail);
+            else if (!print) {
+              console.log(`\x1b[33m\n○ ${name} · approval required\x1b[0m \x1b[2m${String(detail).slice(0, 120)}\x1b[0m`);
+            }
+          }
           const decision = await gate.approve(name, detail);
           if (decision === 'always') {
             alwaysApprove = true;
-            gate = createPermissionGate('yolo');
+            gate = createPermissionGate('yolo', requestPermission);
+            onPermissionModeChange?.('yolo');
             allowed = true;
           } else {
             allowed = !!decision;
@@ -119,6 +123,8 @@ export async function runAgentLoop({
           toolResult = { error: 'User denied this tool call.' };
           status = 'denied';
         } else {
+          if (ui?.onToolStart) ui.onToolStart(name, detail);
+          else if (!print) console.log(`\x1b[33m\n● ${name} · running\x1b[0m`);
           try {
             toolResult = await runtime.execute(name, args);
             if (toolResult?.error || toolResult?.ok === false) status = 'error';
@@ -128,7 +134,7 @@ export async function runAgentLoop({
           }
         }
 
-        if (ui?.onToolEnd) ui.onToolEnd(name, detail, status);
+        if (ui?.onToolEnd) ui.onToolEnd(name, detail, status, toolResult);
         else if (!print) {
           const mark = status === 'ok' ? '\x1b[32m  ✓ done\x1b[0m' : status === 'denied' ? '\x1b[31m  ✗ denied\x1b[0m' : '\x1b[33m  · done\x1b[0m';
           console.log(mark);
@@ -162,8 +168,18 @@ export async function runAgentLoop({
 
   if (!finalText && session.messages.at(-1)?.role !== 'assistant') {
     finalText = '(max turns reached without final answer)';
-    if (!print) console.log(`\x1b[33m${finalText}\x1b[0m`);
+    if (ui?.onNotice) ui.onNotice(finalText, 'warning');
+    else if (!print) console.log(`\x1b[33m${finalText}\x1b[0m`);
   }
 
   return { text: finalText, session, usage: totalUsage };
+}
+
+function sessionTitle(value) {
+  const clean = String(value)
+    .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+  return [...(clean || 'Untitled session')].slice(0, 80).join('');
 }
