@@ -1,0 +1,14 @@
+node_modules/
+.DS_Store
+*.log
+.env
+.env.*
+*.pem
+.auth/
+auth.json
+.cheapai/
+dist/
+coverage/
+.idea/
+.vscode/
+*.local

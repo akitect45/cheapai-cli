@@ -1,0 +1,32 @@
+{
+  "name": "cheapai",
+  "version": "0.3.0",
+  "description": "CheapAI coding agent — Grok-style TUI + agent loop on api.cheapai.im",
+  "type": "module",
+  "bin": {
+    "cheapai": "./bin/cheapai.js"
+  },
+  "scripts": {
+    "start": "node bin/cheapai.js",
+    "cheapai": "node bin/cheapai.js",
+    "login": "node bin/cheapai.js login",
+    "test": "node scripts/test-e2e.mjs",
+    "test:smoke": "node bin/cheapai.js models",
+    "test:live": "node scripts/test-e2e.mjs --live",
+    "test:poll": "node scripts/test-e2e.mjs --poll-shape"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "cheapai",
+    "agent",
+    "cli",
+    "coding-agent"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^13.1.0",
+    "openai": "^4.104.0"
+  }
+}
