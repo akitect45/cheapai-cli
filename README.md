@@ -5,6 +5,7 @@ API: `https://api.cheapai.im/v1`
 
 - 설계: [docs/AGENT_SYSTEMS.md](./docs/AGENT_SYSTEMS.md)
 - 서버 인증: [docs/SERVER_CLI_AUTH.md](./docs/SERVER_CLI_AUTH.md)
+- TUI 사용법과 구조: [docs/TUI.md](./docs/TUI.md)
 
 ## 설치
 
@@ -24,6 +25,11 @@ cheapai
 2. 미로그인 → **Browser** 또는 **API key**  
 3. Browser → device code + `https://cheapai.im/cli/authorize`  
 4. 승인 완료 → **Chat TUI**
+
+기본 TTY 실행은 alternate-screen fullscreen TUI를 사용합니다. stdout이
+터미널이 아니거나 `-p`를 사용하면 headless one-shot 모드로 실행됩니다.
+자세한 화면 구조, 키보드 단축키, 권한 정책, 세션 저장 위치와 개발 검증
+방법은 [TUI 문서](./docs/TUI.md)를 참고하세요.
 
 ```text
   ◆ cheapai / project                          claude-sonnet-5  ask for writes
@@ -74,6 +80,9 @@ cheapai -c
 cheapai --resume <session-id>
 ```
 
+`--continue`는 현재 workspace의 가장 최근 세션을 재개하고, `/sessions`는
+저장된 세션을 picker에서 검색하고 재개합니다.
+
 ### 채팅 슬래시 명령
 
 | 명령 | 설명 |
@@ -106,3 +115,20 @@ cheapai config
 cheapai config --set model=claude-sonnet-5
 cheapai models
 ```
+
+기본 설정 디렉터리는 `~/.cheapai`입니다. 테스트나 격리된 실행에서는
+`CHEAPAI_HOME`으로 저장 위치를 변경할 수 있습니다. API 키는
+`CHEAPAI_API_KEY`, `CHEAPSUB_API_KEY`, `OPENAI_API_KEY` 순서로 환경변수도
+확인합니다.
+
+## 개발
+
+```powershell
+npm test
+node --check src/ui/fullscreen.js
+git diff --check
+```
+
+`npm test`는 에이전트 도구, 권한 정책, terminal wrapping과 fullscreen
+responsive frame을 함께 검사합니다. 구현 상세는 [TUI 문서](./docs/TUI.md)에
+정리되어 있습니다.
