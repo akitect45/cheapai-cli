@@ -44,7 +44,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     entries: hydrateMessages(messages),
     input: String(input),
     cursor: [...String(input)].length,
-    cursorVisible: true,
     commandIndex: 0,
     scroll: 0,
     busy: false,
@@ -62,7 +61,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
   let inputResolve = null;
   let renderTimer = null;
   let spinnerTimer = null;
-  let cursorTimer = null;
   let noticeTimer = null;
   let escapeTimer = null;
   let wasRaw = false;
@@ -116,12 +114,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
         renderNow();
       }, 90);
       spinnerTimer.unref?.();
-      cursorTimer = setInterval(() => {
-        if (state.busy || state.overlay) return;
-        state.cursorVisible = !state.cursorVisible;
-        renderSoon();
-      }, 530);
-      cursorTimer.unref?.();
       renderNow();
     } catch (error) {
       destroy();
@@ -136,7 +128,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     clearTimeout(noticeTimer);
     clearTimeout(escapeTimer);
     clearInterval(spinnerTimer);
-    clearInterval(cursorTimer);
     process.stdin.removeListener('data', onData);
     process.stdout.removeListener('resize', renderNow);
     process.removeListener('exit', onExit);
@@ -149,7 +140,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
   function readInput() {
     state.busy = false;
     state.scroll = 0;
-    wakeCursor();
     renderNow();
     return new Promise((resolve) => {
       inputResolve = resolve;
@@ -259,7 +249,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
       } else {
         state.scroll = 0;
       }
-      wakeCursor();
       renderSoon();
       return;
     }
@@ -278,7 +267,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     if (key === '\u0015') {
       state.input = '';
       state.cursor = 0;
-      wakeCursor();
       renderSoon();
       return;
     }
@@ -339,7 +327,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     state.input = chars.join('');
     state.cursor += [...value].length;
     state.commandIndex = 0;
-    wakeCursor();
     renderSoon();
   }
 
@@ -349,7 +336,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
 
   function setCursor(value) {
     state.cursor = Math.max(0, Math.min([...state.input].length, value));
-    wakeCursor();
     renderSoon();
   }
 
@@ -360,7 +346,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     state.input = chars.join('');
     state.cursor -= 1;
     state.commandIndex = 0;
-    wakeCursor();
     renderSoon();
   }
 
@@ -370,7 +355,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     chars.splice(state.cursor, 1);
     state.input = chars.join('');
     state.commandIndex = 0;
-    wakeCursor();
     renderSoon();
   }
 
@@ -384,7 +368,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     const suggestions = commandSuggestions();
     if (!suggestions.length || state.busy) return false;
     state.commandIndex = (state.commandIndex + amount + suggestions.length) % suggestions.length;
-    wakeCursor();
     renderSoon();
     return true;
   }
@@ -396,13 +379,8 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     state.input = command;
     state.cursor = [...command].length;
     state.commandIndex = 0;
-    wakeCursor();
     renderSoon();
     return true;
-  }
-
-  function wakeCursor() {
-    state.cursorVisible = true;
   }
 
   function stopThinking() {
@@ -513,7 +491,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
 
   function setBusy(value) {
     state.busy = !!value;
-    if (!state.busy) wakeCursor();
     renderSoon();
   }
 
@@ -527,7 +504,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     state.cursor = 0;
     state.commandIndex = 0;
     state.activeThinking = null;
-    wakeCursor();
     if (notice) setNotice(notice, 'success');
     renderNow();
   }
@@ -605,7 +581,27 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     if (!mounted) return;
     const width = Math.max(1, process.stdout.columns || 80);
     const height = Math.max(1, process.stdout.rows || 24);
-    process.stdout.write(`\x1b[H${renderFrame(width, height)}\x1b[J`);
+    const frame = renderFrame(width, height);
+    const cursor = cursorPosition(width, height);
+    process.stdout.write(`\x1b[H${frame}\x1b[J${cursor ? `\x1b[${cursor.row};${cursor.column}H\x1b[?25h` : '\x1b[?25l'}`);
+  }
+
+  function cursorPosition(width, height) {
+    if (state.busy || state.overlay || width < 20 || height < 12) return null;
+    const contentWidth = Math.max(18, Math.min(width - 4, 100));
+    const left = Math.max(1, Math.floor((width - contentWidth) / 2));
+    const suggestions = commandSuggestions();
+    const bodyWidth = Math.max(8, contentWidth - 4);
+    const before = [...state.input].slice(0, state.cursor).join('');
+    const beforeLines = wrapAnsi(before, bodyWidth);
+    const line = beforeLines.at(-1) || '';
+    const composerLength = renderComposer(contentWidth).length;
+    const composerTop = Math.max(5, height - composerLength);
+    const lineOffset = Math.min(1, Math.max(0, beforeLines.length - 1));
+    return {
+      row: Math.min(height, composerTop + suggestions.length + 2 + lineOffset),
+      column: Math.max(1, Math.min(width - 1, left + 3 + displayWidth(line))),
+    };
   }
 
   function renderFrame(width, height) {
@@ -780,7 +776,7 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     const before = chars.slice(0, state.cursor).join('');
     const current = chars[state.cursor] || ' ';
     const after = chars.slice(state.cursor + (chars[state.cursor] ? 1 : 0)).join('');
-    return `${before}${state.cursorVisible ? t.inverse(current) : current}${after}`;
+    return `${before}${current}${after}`;
   }
 
   function renderCommandSuggestions(width) {
