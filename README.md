@@ -112,6 +112,7 @@ cheapai --resume <session-id>
 | `/effort` | 추론 강도 변경 |
 | `/thinking` | 추론 표시 전환 |
 | `/details` | 도구 실행 상세 정보 전환 |
+| `/goal [on|off]` | 읽기·검색 기반 목표 계획 모드 |
 
 ## 도구
 

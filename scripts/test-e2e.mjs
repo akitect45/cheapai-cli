@@ -33,6 +33,11 @@ console.log('cheapai e2e\n');
   if (sp.length < 800) bad('system prompt length', new Error('too short: ' + sp.length));
   else if (!sp.includes('edit_file') || !sp.includes('Hard rules')) bad('system prompt content', new Error('missing sections'));
   else ok(`system prompt (${sp.length} chars)`);
+
+  const goalPrompt = buildSystemPrompt({ cwd: root, model: 'test-model', goalMode: true });
+  if (!goalPrompt.includes('# Goal mode') || !goalPrompt.includes('/goal off')) {
+    bad('goal system prompt', new Error('goal instructions missing'));
+  } else ok('goal system prompt');
 }
 
 // 2) tools runtime
@@ -235,6 +240,7 @@ console.log('cheapai e2e\n');
 // 6) permission policies
 {
   const { createPermissionGate } = await import('../src/agent/permissions.js');
+  const { toolsForMode } = await import('../src/agent/loop.js');
   const ask = createPermissionGate('ask');
   const edits = createPermissionGate('accept-edits');
   if (ask.requiresApproval('read_file') || !ask.requiresApproval('bash')) {
@@ -248,6 +254,12 @@ console.log('cheapai e2e\n');
   if (await printGate.approve('bash', 'echo should-not-prompt')) {
     bad('non-interactive permission', new Error('write prompt was allowed'));
   } else ok('non-interactive permission denial');
+
+  const goalGate = createPermissionGate('ask', null, { interactive: false, allowTodo: true });
+  const goalTools = toolsForMode(true).map((tool) => tool.function.name);
+  if (!(await goalGate.approve('todo_write', 'plan')) || goalTools.includes('bash') || goalTools.includes('edit_file') || !goalTools.includes('read_file')) {
+    bad('goal tool policy', new Error(JSON.stringify(goalTools)));
+  } else ok('goal tool policy');
 }
 
 // 6b) Windows workspace matching
@@ -325,9 +337,36 @@ console.log('cheapai e2e\n');
   thinkingUi.writeUser('thinking test');
   thinkingUi.agentHooks().onThinking(1);
   const thinkingFrame = thinkingUi.renderSnapshot(80, 24);
-  if (!thinkingFrame.includes('Thinking · turn 1') || (thinkingFrame.match(/[●·]/g) || []).length < 4) {
-    bad('thinking indicator', new Error('vertical indicator missing'));
+  if (!thinkingFrame.includes('Thinking · turn 1') || !thinkingFrame.includes('●')) {
+    bad('thinking indicator', new Error('blinking indicator missing'));
   } else ok('thinking indicator');
+
+  const goalUi = createFullscreenChatUi({
+    model: 'claude-sonnet-5',
+    mode: 'ask',
+    effort: 'off',
+    goalMode: true,
+    cwd: root,
+    sessionId: '12345678',
+    input: '/g',
+  });
+  const goalFrame = goalUi.renderSnapshot(80, 24);
+  if (!goalFrame.includes('goal · plan only') || !goalFrame.includes('/goal')) {
+    bad('goal mode frame', new Error('goal state or command missing'));
+  } else ok('goal mode frame');
+
+  const scrollUi = createFullscreenChatUi({
+    model: 'claude-sonnet-5',
+    mode: 'ask',
+    effort: 'off',
+    cwd: root,
+    sessionId: '12345678',
+    messages: Array.from({ length: 30 }, (_, index) => ({ role: index % 2 ? 'assistant' : 'user', content: `message ${index}` })),
+  });
+  const scrollFrame = scrollUi.renderSnapshot(80, 24);
+  if (!scrollFrame.includes('┃') || !scrollFrame.includes('│')) {
+    bad('conversation scrollbar', new Error('scrollbar missing'));
+  } else ok('conversation scrollbar');
 }
 
 // 8) device endpoints shape

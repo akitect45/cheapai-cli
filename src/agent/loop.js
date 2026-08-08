@@ -3,6 +3,14 @@ import { TOOL_DEFINITIONS, createToolRuntime } from './tools.js';
 import { createPermissionGate } from './permissions.js';
 import { saveSession } from './session.js';
 
+const GOAL_TOOL_NAMES = new Set(['read_file', 'glob', 'grep', 'todo_write']);
+
+export function toolsForMode(goalMode = false) {
+  return goalMode
+    ? TOOL_DEFINITIONS.filter((tool) => GOAL_TOOL_NAMES.has(tool.function.name))
+    : TOOL_DEFINITIONS;
+}
+
 /**
  * Run agent until final text or max turns.
  * @param {object} opts
@@ -18,6 +26,7 @@ export async function runAgentLoop({
   temperature = 0.2,
   reasoningEffort = null,
   showThinking = true,
+  goalMode = false,
   print = false,
   alwaysApprove = false,
   onPermissionModeChange = null,
@@ -38,6 +47,7 @@ export async function runAgentLoop({
   });
   let gate = createPermissionGate(alwaysApprove ? 'yolo' : permissionMode, requestPermission, {
     interactive: !print && process.stdin.isTTY && process.stdout.isTTY,
+    allowTodo: goalMode,
   });
 
   session.messages.push({ role: 'user', content: userText });
@@ -55,7 +65,7 @@ export async function runAgentLoop({
       client,
       model: session.model || model,
       messages: session.messages,
-      tools: TOOL_DEFINITIONS,
+      tools: toolsForMode(goalMode),
       temperature,
       reasoningEffort,
       onThinking: (d) => {
@@ -100,8 +110,9 @@ export async function runAgentLoop({
         }
         const detail = runtime.detailFor(name, args);
 
-        let allowed = alwaysApprove;
-        if (!allowed) {
+        const blockedByGoal = goalMode && !GOAL_TOOL_NAMES.has(name);
+        let allowed = !blockedByGoal && alwaysApprove;
+        if (!blockedByGoal && !allowed) {
           if (gate.requiresApproval(name)) {
             if (ui?.onToolPending) ui.onToolPending(name, detail);
             else if (!print) {
@@ -113,6 +124,7 @@ export async function runAgentLoop({
             alwaysApprove = true;
             gate = createPermissionGate('yolo', requestPermission, {
               interactive: !print && process.stdin.isTTY && process.stdout.isTTY,
+              allowTodo: goalMode,
             });
             onPermissionModeChange?.('yolo');
             allowed = true;
@@ -124,7 +136,7 @@ export async function runAgentLoop({
         let toolResult;
         let status = 'ok';
         if (!allowed) {
-          toolResult = { error: 'User denied this tool call.' };
+          toolResult = { error: blockedByGoal ? 'Goal mode allows only read, search, and todo tools.' : 'User denied this tool call.' };
           status = 'denied';
         } else {
           if (ui?.onToolStart) ui.onToolStart(name, detail);

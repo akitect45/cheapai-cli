@@ -69,6 +69,7 @@ export async function startChatTui({
   const maxTurns = opts.maxTurns || cfg.maxTurns || 40;
   let showThinking = cfg.showThinking !== false;
   let showToolDetails = false;
+  let goalMode = !!session?.goalMode;
   const me = whoami();
 
   let { client } = createClient({ model });
@@ -77,14 +78,16 @@ export async function startChatTui({
     session = createSession({
       cwd,
       model,
-      systemPrompt: buildSystemPrompt({ cwd, model }),
+      systemPrompt: buildSystemPrompt({ cwd, model, goalMode }),
     });
+    session.goalMode = goalMode;
     saveSession(session);
   } else {
     session.cwd = cwd;
     session.model = model;
-    if (opts.model && session.messages?.[0]?.role === 'system') {
-      session.messages[0].content = buildSystemPrompt({ cwd, model });
+    session.goalMode = goalMode;
+    if (session.messages?.[0]?.role === 'system') {
+      session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode });
     }
   }
 
@@ -98,11 +101,13 @@ export async function startChatTui({
     sessionId: session.id,
     sessionTitle: session.title,
     showThinking,
+    goalMode,
     messages: session.messages,
   }) : createChatUi({
     model,
     mode: permissionMode,
     effort: reasoningEffort,
+    goalMode,
     cwd,
     user: me.username,
     sessionId: session.id,
@@ -125,6 +130,7 @@ export async function startChatTui({
       temperature: cfg.temperature ?? 0.2,
       reasoningEffort: reasoningEffort === 'off' ? null : reasoningEffort,
       showThinking,
+      goalMode,
       print,
       alwaysApprove: permissionMode === 'yolo',
       onPermissionModeChange: (mode) => {
@@ -238,7 +244,7 @@ export async function startChatTui({
         ui.model = value;
         persistModel(value);
         if (session.messages?.[0]?.role === 'system') {
-          session.messages[0].content = buildSystemPrompt({ cwd, model });
+          session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode });
         }
         refreshClient();
         ui.writeContext('model updated');
@@ -273,19 +279,35 @@ export async function startChatTui({
         config.showThinking = value;
         saveConfig(config);
       },
+      get goalMode() {
+        return goalMode;
+      },
+      set goalMode(value) {
+        goalMode = !!value;
+        session.goalMode = goalMode;
+        if (session.messages?.[0]?.role === 'system') {
+          session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode });
+        }
+        saveSession(session);
+        ui.setGoalMode?.(goalMode);
+        ui.writeContext(`goal mode ${goalMode ? 'on · plan only' : 'off'}`);
+      },
       cwd,
       get client() {
         return client;
       },
       recreateSession() {
+        goalMode = false;
         session = createSession({
           cwd,
           model,
-          systemPrompt: buildSystemPrompt({ cwd, model }),
+          systemPrompt: buildSystemPrompt({ cwd, model, goalMode }),
         });
+        session.goalMode = false;
         saveSession(session);
         ui.sessionId = session.id;
         ui.sessionTitle = '';
+        ui.setGoalMode?.(false);
         if (ui.resetSession) ui.resetSession(session.id, '', `new session ${session.id.slice(0, 8)}`, session.messages);
         else ui.mount(`new session ${session.id.slice(0, 8)}`);
       },
@@ -302,7 +324,12 @@ export async function startChatTui({
         }
         session = next;
         model = next.model || model;
+        goalMode = !!next.goalMode;
+        if (next.messages?.[0]?.role === 'system') {
+          next.messages[0].content = buildSystemPrompt({ cwd, model, goalMode });
+        }
         ui.model = model;
+        ui.setGoalMode?.(goalMode);
         ui.sessionId = next.id;
         ui.sessionTitle = next.title || '';
         refreshClient();
@@ -329,6 +356,16 @@ async function handleSlash(line, ctx) {
 
   if (c === 'details') {
     ctx.toggleToolDetails();
+    return true;
+  }
+
+  if (c === 'goal') {
+    const value = arg.toLowerCase();
+    if (value && !['on', 'off'].includes(value)) {
+      notify(ctx, 'Use /goal, /goal on, or /goal off.', 'error');
+      return true;
+    }
+    ctx.goalMode = value ? value === 'on' : !ctx.goalMode;
     return true;
   }
 
@@ -363,6 +400,7 @@ async function handleSlash(line, ctx) {
       ['model', ctx.model],
       ['effort', ctx.effort],
       ['thinking', ctx.showThinking ? 'visible' : 'hidden'],
+      ['goal mode', ctx.goalMode ? 'on · plan only' : 'off'],
       ['permission', ctx.permissionMode],
       ['session', ctx.session.id],
       ['workspace', ctx.cwd],
@@ -499,6 +537,7 @@ function printHelp() {
   /effort [level]       reasoning: low|medium|high|xhigh|off
   /thinking             toggle reasoning display
   /details              toggle tool execution details
+  /goal [on|off]        plan goals without writes or shell
   /yolo                 toggle auto-approve tools
   /ask                  require tool approval
   /accept-edits         auto file edits
@@ -519,6 +558,7 @@ function showHelp(ctx) {
     ['/effort', 'set reasoning intensity'],
     ['/thinking', 'toggle reasoning display'],
     ['/details', 'toggle tool details'],
+    ['/goal', 'plan goals without writes'],
     ['/ask', 'ask before writes'],
     ['/accept-edits', 'allow file edits'],
     ['/yolo', 'allow all tools'],
@@ -563,8 +603,8 @@ function restoreCookedTty() {
   }
 }
 
-function createChatUi({ model, mode, effort, cwd, user, sessionId, print }) {
-  const state = { model, mode, effort, cwd, user, sessionId, print, showToolDetails: false };
+function createChatUi({ model, mode, effort, goalMode, cwd, user, sessionId, print }) {
+  const state = { model, mode, effort, goalMode, cwd, user, sessionId, print, showToolDetails: false };
   let assistantLineStart = true;
   let reasoningLineStart = true;
   let assistantCells = 0;
@@ -726,6 +766,9 @@ function createChatUi({ model, mode, effort, cwd, user, sessionId, print }) {
     },
     set effort(v) {
       state.effort = v;
+    },
+    setGoalMode(v) {
+      state.goalMode = !!v;
     },
     set sessionId(v) {
       state.sessionId = v;

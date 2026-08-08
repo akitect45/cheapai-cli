@@ -6,7 +6,7 @@ import { findProjectInstructions } from '../config.js';
  * Claude Code–style system prompt: tool discipline, edit policy, environment facts.
  * Tools are also declared via OpenAI `tools` schema; this text steers *when/how* to use them.
  */
-export function buildSystemPrompt({ cwd, model } = {}) {
+export function buildSystemPrompt({ cwd, model, goalMode = false } = {}) {
   const root = path.resolve(cwd || process.cwd());
   const instructions = findProjectInstructions(root);
   const projectBlocks = instructions
@@ -76,6 +76,14 @@ For each user request:
 - Default language: respond in the **same language as the user** (Korean if they write Korean).
 - When done with code changes, list files touched in a short bullet list.
 - If you cannot do something (missing tool, permission, API error), say so plainly.
+
+${goalMode ? `# Goal mode
+You are in goal mode. Define the desired outcome, success criteria, constraints, and a sequenced implementation plan before any implementation work.
+- You may inspect the workspace with read-only tools and maintain a todo list.
+- Do not edit files or run shell commands in this mode, even if the user asks for implementation.
+- State the recommended next action, dependencies, risks, and any decision required from the user.
+- The user must leave goal mode with \`/goal off\` before you make workspace changes.
+` : ''}
 
 # Project instructions
 (Always follow these when present; they override general style but not hard safety rules.)

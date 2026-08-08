@@ -64,6 +64,7 @@ Fullscreen TUI는 프로세스가 종료되거나 `Ctrl+C`가 입력될 때 raw 
 | `Escape` | 입력을 비우거나 스크롤 위치를 초기화 |
 | `PageUp` / `PageDown` | 대화 스크롤 |
 | `Up` / `Down` | 대화 스크롤 |
+| mouse wheel | 대화 viewport 스크롤 |
 | `/` + `Up` / `Down` | 명령 제안 선택 |
 | `/` + `Tab` | 선택한 명령 자동 완성 |
 | `Ctrl+C` | CLI 종료 및 터미널 복구 |
@@ -114,6 +115,10 @@ CLI 프로세스가 종료될 때까지 유지됩니다. 설정 파일에 영구
 `/yolo`는 로컬 설정의 `permissionMode`도 갱신합니다. 반면 권한 overlay의
 `Allow always`는 현재 실행에만 적용됩니다.
 
+`/goal`은 현재 세션을 계획 전용 모드로 전환합니다. Goal 모드에서는 파일 읽기,
+검색과 todo 갱신만 가능하고 파일 수정과 Bash는 차단됩니다. `/goal off`로 일반
+작업 모드로 돌아갈 수 있으며 상태는 세션에 저장됩니다.
+
 ## Slash 명령
 
 | 명령 | 설명 |
@@ -125,6 +130,7 @@ CLI 프로세스가 종료될 때까지 유지됩니다. 설정 파일에 영구
 | `/effort [level]` | `off`, `low`, `medium`, `high`, `xhigh` 설정 |
 | `/thinking` | reasoning 표시 전환 |
 | `/details` | 도구 실행 상세 정보 전환 |
+| `/goal [on|off]` | 목표·완료 기준·실행 계획을 만드는 계획 전용 모드 |
 | `/ask` | 쓰기 도구 승인 요청 모드 |
 | `/accept-edits` | 파일 편집과 todo를 자동 허용 |
 | `/yolo` | 모든 도구 자동 허용 |

@@ -7,7 +7,7 @@ const READ_TOOLS = new Set(['read_file', 'glob', 'grep']);
 /**
  * @param {'ask'|'auto'|'accept-edits'|'yolo'} mode
  */
-export function createPermissionGate(mode = 'ask', requestApproval = null, { interactive } = {}) {
+export function createPermissionGate(mode = 'ask', requestApproval = null, { interactive, allowTodo = false } = {}) {
   const m = mode || 'ask';
   const canPrompt = interactive ?? (process.stdin.isTTY && process.stdout.isTTY);
 
@@ -16,6 +16,7 @@ export function createPermissionGate(mode = 'ask', requestApproval = null, { int
     requiresApproval(toolName) {
       if (m === 'yolo') return false;
       if (READ_TOOLS.has(toolName)) return false;
+      if (allowTodo && toolName === 'todo_write') return false;
       if (m === 'accept-edits' && (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'todo_write')) {
         return false;
       }
@@ -24,6 +25,7 @@ export function createPermissionGate(mode = 'ask', requestApproval = null, { int
     async approve(toolName, detail) {
       if (m === 'yolo') return true;
       if (READ_TOOLS.has(toolName)) return true;
+      if (allowTodo && toolName === 'todo_write') return true;
       if (m === 'accept-edits' && (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'todo_write')) {
         return true;
       }

@@ -10,7 +10,6 @@ import {
 } from './draw.js';
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
-const THINKING_BOUNCE = [0, 1, 2, 3, 2, 1];
 const COMMANDS = [
   ['/help', 'show commands'],
   ['/status', 'session and runtime info'],
@@ -19,6 +18,7 @@ const COMMANDS = [
   ['/effort', 'set reasoning intensity'],
   ['/thinking', 'toggle reasoning display'],
   ['/details', 'toggle tool details'],
+  ['/goal', 'toggle goal planning mode'],
   ['/ask', 'ask before writes'],
   ['/accept-edits', 'allow file edits'],
   ['/yolo', 'allow all tools'],
@@ -32,11 +32,12 @@ const COMMANDS = [
   ['/q', 'quit'],
 ];
 
-export function createFullscreenChatUi({ model, mode, effort, cwd, user, sessionId, sessionTitle = '', showThinking = true, messages = [], input = '' }) {
+export function createFullscreenChatUi({ model, mode, effort, goalMode = false, cwd, user, sessionId, sessionTitle = '', showThinking = true, messages = [], input = '' }) {
   const state = {
     model,
     mode,
     effort,
+    goalMode,
     cwd,
     user,
     sessionId,
@@ -72,7 +73,7 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
   const PASTE_END = '\x1b[201~';
 
   function cleanupTerminal() {
-    process.stdout.write('\x1b[?2004l\x1b[?25h\x1b[?1049l');
+    process.stdout.write('\x1b[?1000l\x1b[?1006l\x1b[?2004l\x1b[?25h\x1b[?1049l\x1b[3J');
   }
 
   function onExit() {
@@ -100,7 +101,7 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     wasFlowing = process.stdin.readableFlowing;
     try {
       if (notice) setNotice(notice, 'success');
-      process.stdout.write('\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l\x1b[?2004h');
+      process.stdout.write('\x1b[3J\x1b[?1049h\x1b[2J\x1b[H\x1b[?25l\x1b[?2004h\x1b[?1000h\x1b[?1006h');
       process.stdin.setRawMode?.(true);
       process.stdin.resume();
       process.stdin.setEncoding('utf8');
@@ -191,6 +192,13 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
       if (inputBuffer.startsWith(PASTE_START)) {
         inputBuffer = inputBuffer.slice(PASTE_START.length);
         pasteMode = true;
+        continue;
+      }
+
+      const mouse = readMouseSequence(inputBuffer);
+      if (mouse) {
+        inputBuffer = inputBuffer.slice(mouse[0].length);
+        handleMouse(Number(mouse[1]), mouse[4]);
         continue;
       }
 
@@ -319,6 +327,12 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
       overlay.index = 0;
       renderNow();
     }
+  }
+
+  function handleMouse(button, action) {
+    if (state.overlay || action !== 'M' || (button & 64) === 0) return;
+    const amount = Math.max(3, Math.floor(viewportHeight() / 4));
+    scrollBy((button & 1) === 0 ? amount : -amount);
   }
 
   function insertText(value) {
@@ -622,9 +636,25 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     const visible = body.slice(start, start + viewHeight);
     for (let i = 0; i < visible.length; i++) screen[viewTop + i] = offsetLine(visible[i], left);
     for (let i = 0; i < composer.length; i++) screen[composerTop + i] = offsetLine(composer[i], left);
+    renderScrollBar(screen, viewTop, viewHeight, left, contentWidth, width, body.length, maxScroll);
 
     if (state.overlay) renderOverlay(screen, width, height, contentWidth);
     return screen.map((line) => padLine(line, width)).join('\n');
+  }
+
+  function renderScrollBar(screen, top, height, left, contentWidth, width, totalLines, maxScroll) {
+    if (maxScroll <= 0 || height < 3) return;
+    const column = Math.min(width - 2, left + contentWidth + 1);
+    const thumbHeight = Math.max(1, Math.round((height * height) / totalLines));
+    const travel = Math.max(0, height - thumbHeight);
+    const fromTop = travel - Math.round((state.scroll / maxScroll) * travel);
+    for (let index = 0; index < height; index++) {
+      const row = top + index;
+      const line = screen[row] || '';
+      const gap = Math.max(0, column - displayWidth(line));
+      const mark = index >= fromTop && index < fromTop + thumbHeight ? t.accent('┃') : t.border('│');
+      screen[row] = `${line}${' '.repeat(gap)}${mark}`;
+    }
   }
 
   function renderTinyFrame(width, height) {
@@ -638,7 +668,8 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     const project = clean(path.basename(state.cwd) || shortPath(state.cwd));
     const leftText = `${t.bold(t.accent('◆ cheapai'))} ${t.dim('/')} ${t.white(clipCells(project, Math.max(8, Math.floor(contentWidth * 0.35))))}`;
     const busy = state.busy ? `${t.yellow(SPINNER[state.frame])} ${t.dim('working')}` : t.green('● ready');
-    const rightText = `${t.cyan(clipCells(clean(state.model), Math.max(8, Math.floor(contentWidth * 0.3))))}  ${permissionLabel(state.mode)}`;
+    const workspaceMode = state.goalMode ? t.magenta('goal · plan only') : permissionLabel(state.mode);
+    const rightText = `${t.cyan(clipCells(clean(state.model), Math.max(8, Math.floor(contentWidth * 0.3))))}  ${workspaceMode}`;
     screen[0] = offsetLine(joinSides(leftText, rightText, contentWidth), left);
     const subtitle = clean(state.sessionTitle || `session ${state.sessionId.slice(0, 8)}`);
     const meta = state.effort && state.effort !== 'off' ? `${busy}  ${t.dim(`effort ${state.effort}`)}` : busy;
@@ -701,13 +732,8 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
 
   function renderThinking(lines, entry, width) {
     if (entry.active && state.busy) {
-      lines.push('');
-      const activeDot = THINKING_BOUNCE[state.frame % THINKING_BOUNCE.length];
-      for (let index = 0; index < 4; index++) {
-        const dot = index === activeDot ? t.yellow('●') : t.border('·');
-        const label = index === 1 ? t.dim(`Thinking${entry.turn ? ` · turn ${entry.turn}` : ''}`) : '';
-        lines.push(`${dot}  ${label}`);
-      }
+      const dot = state.frame < SPINNER.length / 2 ? t.yellow('●') : ' ';
+      lines.push('', `${dot}  ${t.dim(`Thinking${entry.turn ? ` · turn ${entry.turn}` : ''}`)}`);
     } else {
       lines.push('', `${t.yellow('┊')} ${t.dim(`Thinking${entry.turn ? ` · turn ${entry.turn}` : ''}`)}`);
     }
@@ -764,7 +790,13 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     out.push(border(`╭${'─'.repeat(width - 2)}╮`));
     for (const line of inputLines) out.push(`${border('│')} ${line}${' '.repeat(Math.max(0, bodyWidth - displayWidth(line)))} ${border('│')}`);
     out.push(border(`╰${'─'.repeat(width - 2)}╯`));
-    const mode = state.mode === 'yolo' ? t.yellow('all tools') : state.mode === 'accept-edits' ? t.cyan('edits allowed') : t.dim('ask for writes');
+    const mode = state.goalMode
+      ? t.magenta('goal · plan only')
+      : state.mode === 'yolo'
+        ? t.yellow('all tools')
+        : state.mode === 'accept-edits'
+          ? t.cyan('edits allowed')
+          : t.dim('ask for writes');
     out.push(joinSides(`${t.accent('build')}  ${t.dim(state.model)}`, mode, width));
     const notice = state.notice ? paintNotice(state.notice, state.noticeTone) : t.dim('Enter send  ·  / commands  ·  PgUp scroll  ·  Ctrl+C exit');
     out.push(clipStyled(notice, width));
@@ -856,6 +888,7 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     set sessionTitle(value) { state.sessionTitle = value || ''; renderSoon(); },
     setToolDetails(value) { state.showToolDetails = !!value; renderSoon(); },
     setThinkingVisible(value) { state.showThinking = !!value; renderSoon(); },
+    setGoalMode(value) { state.goalMode = !!value; renderSoon(); },
   };
 }
 
@@ -869,6 +902,10 @@ function readEscapeSequence(value) {
   if (value.startsWith('\x1b[')) return value.match(/^\x1b\[[0-?]*[ -/]*[@-~]/)?.[0] || null;
   if (value.startsWith('\x1bO')) return value.match(/^\x1bO[ -~]/)?.[0] || null;
   return '\x1b';
+}
+
+function readMouseSequence(value) {
+  return value.match(/^\x1b\[<(\d+);(\d+);(\d+)([Mm])/);
 }
 
 function isPartialEscapeSequence(value) {
