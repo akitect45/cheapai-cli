@@ -288,6 +288,46 @@ console.log('cheapai e2e\n');
   if (!resumed.includes('Previous question') || !resumed.includes('Previous answer')) {
     bad('fullscreen session hydration', new Error('resumed messages missing'));
   } else ok('fullscreen session hydration');
+
+  const slashUi = createFullscreenChatUi({
+    model: 'claude-sonnet-5',
+    mode: 'ask',
+    effort: 'off',
+    cwd: root,
+    sessionId: '12345678',
+    input: '/',
+  });
+  const slashFrame = slashUi.renderSnapshot(80, 24);
+  if (!slashFrame.includes('/help') || !slashFrame.includes('/status')) {
+    bad('slash command suggestions', new Error('dropdown suggestions missing'));
+  } else ok('slash command suggestions');
+
+  const koreanUi = createFullscreenChatUi({
+    model: 'claude-sonnet-5',
+    mode: 'ask',
+    effort: 'off',
+    cwd: root,
+    sessionId: '12345678',
+    input: '한글 입력.',
+  });
+  const koreanFrame = koreanUi.renderSnapshot(80, 24);
+  if (!koreanFrame.includes('한글 입력.') || koreanFrame.split('\n').some((line) => displayWidth(line) >= 80)) {
+    bad('Korean input frame', new Error('wide input frame overflowed'));
+  } else ok('Korean input frame');
+
+  const thinkingUi = createFullscreenChatUi({
+    model: 'claude-sonnet-5',
+    mode: 'ask',
+    effort: 'off',
+    cwd: root,
+    sessionId: '12345678',
+  });
+  thinkingUi.writeUser('thinking test');
+  thinkingUi.agentHooks().onThinking(1);
+  const thinkingFrame = thinkingUi.renderSnapshot(80, 24);
+  if (!thinkingFrame.includes('Thinking · turn 1') || (thinkingFrame.match(/[●·]/g) || []).length < 4) {
+    bad('thinking indicator', new Error('vertical indicator missing'));
+  } else ok('thinking indicator');
 }
 
 // 8) device endpoints shape

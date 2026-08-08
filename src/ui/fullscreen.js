@@ -10,8 +10,29 @@ import {
 } from './draw.js';
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const THINKING_BOUNCE = [0, 1, 2, 3, 2, 1];
+const COMMANDS = [
+  ['/help', 'show commands'],
+  ['/status', 'session and runtime info'],
+  ['/sessions', 'resume a saved session'],
+  ['/model', 'search and switch model'],
+  ['/effort', 'set reasoning intensity'],
+  ['/thinking', 'toggle reasoning display'],
+  ['/details', 'toggle tool details'],
+  ['/ask', 'ask before writes'],
+  ['/accept-edits', 'allow file edits'],
+  ['/yolo', 'allow all tools'],
+  ['/new', 'start a new session'],
+  ['/clear', 'start a new session'],
+  ['/dashboard', 'open web dashboard'],
+  ['/config', 'show local configuration'],
+  ['/logout', 'clear credentials and quit'],
+  ['/exit', 'quit'],
+  ['/quit', 'quit'],
+  ['/q', 'quit'],
+];
 
-export function createFullscreenChatUi({ model, mode, effort, cwd, user, sessionId, sessionTitle = '', showThinking = true, messages = [] }) {
+export function createFullscreenChatUi({ model, mode, effort, cwd, user, sessionId, sessionTitle = '', showThinking = true, messages = [], input = '' }) {
   const state = {
     model,
     mode,
@@ -21,8 +42,10 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     sessionId,
     sessionTitle,
     entries: hydrateMessages(messages),
-    input: '',
-    cursor: 0,
+    input: String(input),
+    cursor: [...String(input)].length,
+    cursorVisible: true,
+    commandIndex: 0,
     scroll: 0,
     busy: false,
     showToolDetails: false,
@@ -32,12 +55,14 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     noticeTone: 'muted',
     usage: null,
     frame: 0,
+    activeThinking: null,
   };
 
   let mounted = false;
   let inputResolve = null;
   let renderTimer = null;
   let spinnerTimer = null;
+  let cursorTimer = null;
   let noticeTimer = null;
   let escapeTimer = null;
   let wasRaw = false;
@@ -91,6 +116,12 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
         renderNow();
       }, 90);
       spinnerTimer.unref?.();
+      cursorTimer = setInterval(() => {
+        if (state.busy || state.overlay) return;
+        state.cursorVisible = !state.cursorVisible;
+        renderSoon();
+      }, 530);
+      cursorTimer.unref?.();
       renderNow();
     } catch (error) {
       destroy();
@@ -105,6 +136,7 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     clearTimeout(noticeTimer);
     clearTimeout(escapeTimer);
     clearInterval(spinnerTimer);
+    clearInterval(cursorTimer);
     process.stdin.removeListener('data', onData);
     process.stdout.removeListener('resize', renderNow);
     process.removeListener('exit', onExit);
@@ -117,6 +149,7 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
   function readInput() {
     state.busy = false;
     state.scroll = 0;
+    wakeCursor();
     renderNow();
     return new Promise((resolve) => {
       inputResolve = resolve;
@@ -124,6 +157,7 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
   }
 
   function submitInput() {
+    if (commandSuggestions().length) completeCommand();
     const value = state.input.trim();
     if (!value || !inputResolve || state.busy) return;
     state.input = '';
@@ -225,14 +259,16 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
       } else {
         state.scroll = 0;
       }
-      renderNow();
+      wakeCursor();
+      renderSoon();
       return;
     }
     if (key === '\x1b[5~') return scrollBy(viewportHeight() - 2);
     if (key === '\x1b[6~') return scrollBy(-(viewportHeight() - 2));
-    if (key === '\x1b[A') return scrollBy(3);
-    if (key === '\x1b[B') return scrollBy(-3);
+    if (key === '\x1b[A') return moveCommand(-1) || scrollBy(3);
+    if (key === '\x1b[B') return moveCommand(1) || scrollBy(-3);
     if (state.busy) return;
+    if (key === '\t' && completeCommand()) return;
     if (key === '\x1b[D') return moveCursor(-1);
     if (key === '\x1b[C') return moveCursor(1);
     if (key === '\x1b[H' || key === '\u0001') return setCursor(0);
@@ -242,7 +278,8 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     if (key === '\u0015') {
       state.input = '';
       state.cursor = 0;
-      renderNow();
+      wakeCursor();
+      renderSoon();
       return;
     }
     if (key === '\r' || key === '\n') {
@@ -301,7 +338,9 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     chars.splice(state.cursor, 0, ...[...value]);
     state.input = chars.join('');
     state.cursor += [...value].length;
-    renderNow();
+    state.commandIndex = 0;
+    wakeCursor();
+    renderSoon();
   }
 
   function moveCursor(amount) {
@@ -310,7 +349,8 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
 
   function setCursor(value) {
     state.cursor = Math.max(0, Math.min([...state.input].length, value));
-    renderNow();
+    wakeCursor();
+    renderSoon();
   }
 
   function deleteBackward() {
@@ -319,7 +359,9 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     chars.splice(state.cursor - 1, 1);
     state.input = chars.join('');
     state.cursor -= 1;
-    renderNow();
+    state.commandIndex = 0;
+    wakeCursor();
+    renderSoon();
   }
 
   function deleteForward() {
@@ -327,7 +369,45 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     if (state.cursor >= chars.length) return;
     chars.splice(state.cursor, 1);
     state.input = chars.join('');
-    renderNow();
+    state.commandIndex = 0;
+    wakeCursor();
+    renderSoon();
+  }
+
+  function commandSuggestions() {
+    if (!/^\/[^\s]*$/.test(state.input)) return [];
+    const query = state.input.slice(1).toLowerCase();
+    return COMMANDS.filter(([command]) => command.slice(1).startsWith(query)).slice(0, 5);
+  }
+
+  function moveCommand(amount) {
+    const suggestions = commandSuggestions();
+    if (!suggestions.length || state.busy) return false;
+    state.commandIndex = (state.commandIndex + amount + suggestions.length) % suggestions.length;
+    wakeCursor();
+    renderSoon();
+    return true;
+  }
+
+  function completeCommand() {
+    const suggestions = commandSuggestions();
+    if (!suggestions.length || state.busy) return false;
+    const [command] = suggestions[Math.min(state.commandIndex, suggestions.length - 1)];
+    state.input = command;
+    state.cursor = [...command].length;
+    state.commandIndex = 0;
+    wakeCursor();
+    renderSoon();
+    return true;
+  }
+
+  function wakeCursor() {
+    state.cursorVisible = true;
+  }
+
+  function stopThinking() {
+    if (state.activeThinking) state.activeThinking.active = false;
+    state.activeThinking = null;
   }
 
   function scrollBy(amount) {
@@ -433,6 +513,7 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
 
   function setBusy(value) {
     state.busy = !!value;
+    if (!state.busy) wakeCursor();
     renderSoon();
   }
 
@@ -444,6 +525,9 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     state.scroll = 0;
     state.input = '';
     state.cursor = 0;
+    state.commandIndex = 0;
+    state.activeThinking = null;
+    wakeCursor();
     if (notice) setNotice(notice, 'success');
     renderNow();
   }
@@ -451,7 +535,10 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
   function agentHooks() {
     return {
       onThinking(turn) {
-        state.entries.push({ type: 'thinking', turn, text: '' });
+        if (state.activeThinking) state.activeThinking.active = false;
+        const entry = { type: 'thinking', turn, text: '', active: true };
+        state.entries.push(entry);
+        state.activeThinking = entry;
         renderSoon();
       },
       onReasoningDelta(text) {
@@ -464,6 +551,7 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
         renderSoon();
       },
       onAssistantStart() {
+        stopThinking();
         state.entries.push({ type: 'assistant', text: '', startedAt: Date.now() });
         renderSoon();
       },
@@ -477,12 +565,14 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
         renderSoon();
       },
       onAssistantEnd() {
+        stopThinking();
         const entry = [...state.entries].reverse().find((item) => item.type === 'assistant' && !item.completedAt);
         if (entry) entry.completedAt = Date.now();
         renderSoon();
       },
       onToolPending() {},
       onToolStart(name, detail) {
+        stopThinking();
         state.entries.push({ type: 'tool', name, detail, status: 'running', result: null });
         renderSoon();
       },
@@ -614,7 +704,17 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
   }
 
   function renderThinking(lines, entry, width) {
-    lines.push('', `${t.yellow('┊')} ${t.dim(`Thinking${entry.turn ? ` · turn ${entry.turn}` : ''}`)}`);
+    if (entry.active && state.busy) {
+      lines.push('');
+      const activeDot = THINKING_BOUNCE[state.frame % THINKING_BOUNCE.length];
+      for (let index = 0; index < 4; index++) {
+        const dot = index === activeDot ? t.yellow('●') : t.border('·');
+        const label = index === 1 ? t.dim(`Thinking${entry.turn ? ` · turn ${entry.turn}` : ''}`) : '';
+        lines.push(`${dot}  ${label}`);
+      }
+    } else {
+      lines.push('', `${t.yellow('┊')} ${t.dim(`Thinking${entry.turn ? ` · turn ${entry.turn}` : ''}`)}`);
+    }
     if (state.showToolDetails && entry.text) {
       for (const line of safeWrap(entry.text, width - 4).slice(-8)) lines.push(`${t.border('┊')} ${t.dim(line)}`);
     }
@@ -664,7 +764,8 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     inputLines = inputLines.slice(-2);
     while (inputLines.length < 2) inputLines.push('');
     const border = state.busy ? t.border : t.accent;
-    const out = [border(`╭${'─'.repeat(width - 2)}╮`)];
+    const out = renderCommandSuggestions(width);
+    out.push(border(`╭${'─'.repeat(width - 2)}╮`));
     for (const line of inputLines) out.push(`${border('│')} ${line}${' '.repeat(Math.max(0, bodyWidth - displayWidth(line)))} ${border('│')}`);
     out.push(border(`╰${'─'.repeat(width - 2)}╯`));
     const mode = state.mode === 'yolo' ? t.yellow('all tools') : state.mode === 'accept-edits' ? t.cyan('edits allowed') : t.dim('ask for writes');
@@ -679,7 +780,18 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     const before = chars.slice(0, state.cursor).join('');
     const current = chars[state.cursor] || ' ';
     const after = chars.slice(state.cursor + (chars[state.cursor] ? 1 : 0)).join('');
-    return `${before}${t.inverse(current)}${after}`;
+    return `${before}${state.cursorVisible ? t.inverse(current) : current}${after}`;
+  }
+
+  function renderCommandSuggestions(width) {
+    const suggestions = commandSuggestions();
+    if (!suggestions.length) return [];
+    state.commandIndex = Math.min(state.commandIndex, suggestions.length - 1);
+    return suggestions.map(([command, description], index) => {
+      const marker = index === state.commandIndex ? t.accent('▌') : ' ';
+      const label = index === state.commandIndex ? t.bold(command) : command;
+      return clipStyled(`${marker} ${label}  ${t.dim(description)}`, width);
+    });
   }
 
   function renderOverlay(screen, width, height, contentWidth) {
@@ -798,8 +910,10 @@ function offsetLine(line, offset) {
 }
 
 function padLine(line, width) {
-  const clipped = clipStyled(line, width);
-  return `${clipped}${' '.repeat(Math.max(0, width - displayWidth(clipped)))}`;
+  // Leave the terminal's last column unused so wide-character input cannot trigger auto-wrap.
+  const safeWidth = Math.max(1, width - 1);
+  const clipped = clipStyled(line, safeWidth);
+  return `${clipped}${' '.repeat(Math.max(0, safeWidth - displayWidth(clipped)))}`;
 }
 
 function clipStyled(value, maxWidth) {

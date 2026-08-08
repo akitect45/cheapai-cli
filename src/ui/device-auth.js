@@ -7,7 +7,7 @@ import {
   loginWithApiKey,
   redactAuthSecrets,
 } from '../auth.js';
-import { loadConfig, DEFAULT_WEB_ORIGIN } from '../config.js';
+import { loadAuth, loadConfig, DEFAULT_WEB_ORIGIN } from '../config.js';
 import { readSecret } from './input.js';
 
 /**
@@ -18,6 +18,14 @@ export async function runBrowserAuthFlow({ webOrigin } = {}) {
   const cfg = loadConfig();
   const origin = (webOrigin || cfg.webOrigin || DEFAULT_WEB_ORIGIN).replace(/\/$/, '');
   const debug = process.env.CHEAPAI_DEBUG === '1' || process.env.CHEAPAI_DEBUG === 'true';
+  const savedAuth = loadAuth();
+  if (savedAuth?.apiKey && savedAuth.keyName === 'CheapAI CLI (browser)') {
+    const savedOrigin = String(savedAuth.webOrigin || cfg.webOrigin || DEFAULT_WEB_ORIGIN).replace(/\/$/, '');
+    if (savedOrigin === origin) {
+      console.log(t.dim('  Reusing existing CheapAI CLI browser credential.'));
+      return savedAuth;
+    }
+  }
 
   clearScreen();
   console.log('');

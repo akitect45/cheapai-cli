@@ -64,6 +64,8 @@ Fullscreen TUI는 프로세스가 종료되거나 `Ctrl+C`가 입력될 때 raw 
 | `Escape` | 입력을 비우거나 스크롤 위치를 초기화 |
 | `PageUp` / `PageDown` | 대화 스크롤 |
 | `Up` / `Down` | 대화 스크롤 |
+| `/` + `Up` / `Down` | 명령 제안 선택 |
+| `/` + `Tab` | 선택한 명령 자동 완성 |
 | `Ctrl+C` | CLI 종료 및 터미널 복구 |
 | bracketed paste | 여러 줄 붙여넣기 |
 
@@ -172,6 +174,9 @@ cheapai whoami
 `CHEAPSUB_API_KEY`를 사용할 수 있습니다.
 일반 `OPENAI_API_KEY`는 CheapAI 로그인으로 간주하지 않으므로, CheapAI 키는
 두 환경변수 중 하나를 사용해야 합니다.
+로컬 `auth.json`에 `CheapAI CLI (browser)` 키가 있으면 browser 로그인 시
+새 키를 만들지 않고 해당 credential을 재사용합니다. 서버에만 있고 원문이
+로컬에 저장되지 않은 키는 보안상 CLI가 복원할 수 없습니다.
 
 ## 개발 구조
 
