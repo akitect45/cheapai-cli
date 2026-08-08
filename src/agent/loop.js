@@ -3,6 +3,7 @@ import { TOOL_DEFINITIONS, createToolRuntime } from './tools.js';
 import { createPermissionGate } from './permissions.js';
 import { saveSession } from './session.js';
 import { mergeSessionUsage, normalizeUsage } from './usage.js';
+import { beginTurn, finishTurn, recordBash, recordFileChange } from './history.js';
 
 const GOAL_TOOL_NAMES = new Set(['read_file', 'glob', 'grep', 'todo_write']);
 
@@ -33,8 +34,10 @@ export async function runAgentLoop({
   onPermissionModeChange = null,
   requestPermission = null,
   ui = null,
+  signal = null,
 }) {
   const cwd = session.cwd || process.cwd();
+  const checkpoint = beginTurn(session);
   const runtime = createToolRuntime({
     cwd,
     onTodo: (todos) => {
@@ -45,6 +48,8 @@ export async function runAgentLoop({
         );
       }
     },
+    onFileChange: (change) => recordFileChange(checkpoint, change),
+    onBash: (command) => recordBash(checkpoint, command),
   });
   let gate = createPermissionGate(alwaysApprove ? 'yolo' : permissionMode, requestPermission, {
     interactive: !print && process.stdin.isTTY && process.stdout.isTTY,
@@ -57,6 +62,7 @@ export async function runAgentLoop({
   let finalText = '';
   let totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_credits: 0, cost_usd: 0 };
 
+  try {
   for (let turn = 1; turn <= maxTurns; turn++) {
     if (ui?.onThinking) ui.onThinking(turn);
     else if (!print) process.stdout.write(`\x1b[2m\n● thinking (turn ${turn})…\x1b[0m\n`);
@@ -69,6 +75,7 @@ export async function runAgentLoop({
       tools: toolsForMode(goalMode),
       temperature,
       reasoningEffort,
+      signal,
       onThinking: (d) => {
         if (showThinking) {
           if (ui?.onReasoningDelta) ui.onReasoningDelta(d);
@@ -153,7 +160,7 @@ export async function runAgentLoop({
           if (ui?.onToolStart) ui.onToolStart(name, detail);
           else if (!print) console.log(`\x1b[33m\n● ${name} · running\x1b[0m`);
           try {
-            toolResult = await runtime.execute(name, args);
+            toolResult = await runtime.execute(name, args, { signal });
             if (toolResult?.error || toolResult?.ok === false) status = 'error';
           } catch (err) {
             toolResult = { error: String(err?.message || err) };
@@ -192,6 +199,10 @@ export async function runAgentLoop({
     }
     break;
   }
+  } catch (error) {
+    finishTurn(session, checkpoint);
+    throw error;
+  }
 
   if (!finalText && session.messages.at(-1)?.role !== 'assistant') {
     finalText = '(max turns reached without final answer)';
@@ -199,6 +210,7 @@ export async function runAgentLoop({
     else if (!print) console.log(`\x1b[33m${finalText}\x1b[0m`);
   }
 
+  finishTurn(session, checkpoint);
   return { text: finalText, session, usage: totalUsage, contextTokens: session.lastContextTokens || 0 };
 }
 

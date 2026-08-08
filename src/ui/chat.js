@@ -34,6 +34,7 @@ import {
   createSession,
   loadSession,
   findLatestSession,
+  forkSession,
   listSessions,
   saveSession,
 } from '../agent/session.js';
@@ -43,6 +44,8 @@ import { selectMenu } from './select.js';
 import { createFullscreenChatUi } from './fullscreen.js';
 import { compactSession } from '../agent/compact.js';
 import { exportSession as writeSessionExport } from '../agent/export.js';
+import { copyText } from './clipboard.js';
+import { loadCustomAgents, loadCustomCommands, renderCustomCommand } from '../agent/commands.js';
 import {
   accountUsageRows,
   contextUsageLabel,
@@ -51,6 +54,7 @@ import {
   formatWon,
   sessionUsageRows,
 } from '../agent/usage.js';
+import { redoTurn, undoTurn } from '../agent/history.js';
 
 /**
  * Append-only interactive chat for a focused coding workspace.
@@ -70,10 +74,17 @@ export async function startChatTui({
   } else if (opts.continue) {
     session = findLatestSession(requestedCwd);
   }
+  if (opts.fork && !session) {
+    throw new Error('--fork requires --continue or --resume with an existing session.');
+  }
+  if (session && opts.fork) session = forkSession(session, { title: opts.title });
   const cwd = path.resolve(session?.cwd || requestedCwd);
   process.chdir(cwd);
+  const customCommands = loadCustomCommands(cwd);
+  const customAgents = loadCustomAgents(cwd);
 
   let model = session?.model && !opts.model ? session.model : resolveModel(opts.model, cfg);
+  let agentName = opts.agent || session?.agent || 'build';
   let reasoningEffort = opts.effort || cfg.reasoningEffort || 'off';
   let permissionMode = opts.yolo
     ? 'yolo'
@@ -88,23 +99,32 @@ export async function startChatTui({
   const autoCompact = opts.autoCompact ?? cfg.autoCompact !== false;
   const compactThreshold = Math.min(0.95, Math.max(0.5, Number(cfg.compactThreshold) || 0.8));
   const me = whoami();
+  let activeController = null;
 
   let { client, baseURL, apiKey } = createClient({ model });
+
+  function agentInstructions() {
+    return customAgents.find((agent) => agent.name === agentName)?.instructions || '';
+  }
 
   if (!session) {
     session = createSession({
       cwd,
       model,
-      systemPrompt: buildSystemPrompt({ cwd, model, goalMode }),
+      systemPrompt: buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() }),
     });
     session.goalMode = goalMode;
+    session.agent = agentName;
+    if (opts.title) session.title = String(opts.title).trim().slice(0, 80);
     saveSession(session);
   } else {
     session.cwd = cwd;
     session.model = model;
     session.goalMode = goalMode;
+    session.agent = agentName;
+    if (opts.title) session.title = String(opts.title).trim().slice(0, 80);
     if (session.messages?.[0]?.role === 'system') {
-      session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode });
+      session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() });
     }
     saveSession(session);
   }
@@ -125,6 +145,8 @@ export async function startChatTui({
     contextTokens: session.lastContextTokens,
     accountUsage,
     showBalance,
+    commands: customCommands,
+    agent: agentName,
     messages: session.messages,
   }) : createChatUi({
     model,
@@ -136,6 +158,7 @@ export async function startChatTui({
     sessionId: session.id,
     print,
   });
+  ui.setAbortHandler?.(() => activeController?.abort());
 
   function refreshClient() {
     ({ client, baseURL, apiKey } = createClient({ model }));
@@ -225,34 +248,40 @@ export async function startChatTui({
   const runOnce = async (text) => {
     await maybeAutoCompact(text);
     if (!print) ui.writeUser(text);
-    const result = await runAgentLoop({
-      client,
-      model,
-      session,
-      userText: text,
-      permissionMode,
-      maxTurns,
-      temperature: cfg.temperature ?? 0.2,
-      reasoningEffort: reasoningEffort === 'off' ? null : reasoningEffort,
-      showThinking,
-      goalMode,
-      print,
-      alwaysApprove: permissionMode === 'yolo',
-      onPermissionModeChange: (mode) => {
-        permissionMode = mode;
-        ui.mode = mode;
-        ui.writeContext('all tools allowed until exit');
-      },
-      requestPermission: ui.requestPermission || null,
-      ui: print ? null : ui.agentHooks(),
-    });
-    if (!print && result.usage) {
-      ui.writeUsage(result.usage, session.usage, contextWindow, session.lastContextTokens);
+    activeController = new AbortController();
+    try {
+      const result = await runAgentLoop({
+        client,
+        model,
+        session,
+        userText: text,
+        permissionMode,
+        maxTurns,
+        temperature: cfg.temperature ?? 0.2,
+        reasoningEffort: reasoningEffort === 'off' ? null : reasoningEffort,
+        showThinking,
+        goalMode,
+        print,
+        signal: activeController.signal,
+        alwaysApprove: permissionMode === 'yolo',
+        onPermissionModeChange: (mode) => {
+          permissionMode = mode;
+          ui.mode = mode;
+          ui.writeContext('all tools allowed until exit');
+        },
+        requestPermission: ui.requestPermission || null,
+        ui: print ? null : ui.agentHooks(),
+      });
+      if (!print && result.usage) {
+        ui.writeUsage(result.usage, session.usage, contextWindow, session.lastContextTokens);
+      }
+      if (!print && showBalance) void refreshAccountUsage();
+      if (!print) ui.sessionTitle = session.title;
+      return result;
+    } finally {
+      activeController = null;
+      ui.setBusy?.(false);
     }
-    if (!print && showBalance) void refreshAccountUsage();
-    if (!print) ui.sessionTitle = session.title;
-    ui.setBusy?.(false);
-    return result;
   };
 
   if (print) {
@@ -293,7 +322,13 @@ export async function startChatTui({
         try {
           await runOnce(line);
         } catch (error) {
-          ui.addNotice(error.message || String(error), 'error');
+          if (error?.name === 'AbortError' || /aborted|abort/i.test(error?.message || '')) {
+            ui.resetSession?.(session.id, session.title || '', '', session.messages);
+            ui.setSessionUsage?.(session.usage, contextWindow, session.lastContextTokens);
+            ui.addNotice('Generation stopped.', 'warning');
+          } else {
+            ui.addNotice(error.message || String(error), 'error');
+          }
           ui.setBusy(false);
         }
       }
@@ -344,6 +379,35 @@ export async function startChatTui({
   }
 
   function createSlashContext() {
+    function activateSession(next, notice) {
+      session = next;
+      model = next.model || model;
+      agentName = next.agent || 'build';
+      goalMode = !!next.goalMode;
+      contextWindow = Number(next.contextWindow) || null;
+      if (next.messages?.[0]?.role === 'system') {
+        next.messages[0].content = buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() });
+      }
+      ui.model = model;
+      ui.setAgent?.(agentName);
+      ui.setGoalMode?.(goalMode);
+      ui.sessionId = next.id;
+      ui.sessionTitle = next.title || '';
+      refreshClient();
+      if (ui.resetSession) ui.resetSession(next.id, next.title || '', notice, next.messages);
+      else ui.mount(notice);
+      ui.setSessionUsage?.(next.usage, contextWindow, next.lastContextTokens);
+      ui.setContextWindow?.(contextWindow);
+      void refreshModelInfo();
+    }
+
+    function refreshSessionView(notice) {
+      if (ui.resetSession) ui.resetSession(session.id, session.title || '', notice, session.messages);
+      else ui.writeContext(notice);
+      ui.setSessionUsage?.(session.usage, contextWindow, session.lastContextTokens);
+      ui.sessionTitle = session.title || '';
+    }
+
     return {
       ui,
       get session() {
@@ -362,7 +426,7 @@ export async function startChatTui({
         ui.setContextWindow?.(null);
         persistModel(value);
         if (session.messages?.[0]?.role === 'system') {
-          session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode });
+          session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() });
         }
         saveSession(session);
         refreshClient();
@@ -402,6 +466,21 @@ export async function startChatTui({
       get goalMode() {
         return goalMode;
       },
+      get agent() {
+        return agentName;
+      },
+      set agent(value) {
+        const normalized = String(value || '').trim().toLowerCase();
+        if (!['build', ...customAgents.map((agent) => agent.name)].includes(normalized)) return;
+        agentName = normalized;
+        session.agent = agentName;
+        if (session.messages?.[0]?.role === 'system') {
+          session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() });
+        }
+        saveSession(session);
+        ui.setAgent?.(agentName);
+        ui.writeContext(`agent ${agentName}`);
+      },
       get showBalance() {
         return showBalance;
       },
@@ -416,7 +495,7 @@ export async function startChatTui({
         goalMode = !!value;
         session.goalMode = goalMode;
         if (session.messages?.[0]?.role === 'system') {
-          session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode });
+          session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() });
         }
         saveSession(session);
         ui.setGoalMode?.(goalMode);
@@ -431,9 +510,10 @@ export async function startChatTui({
         session = createSession({
           cwd,
           model,
-          systemPrompt: buildSystemPrompt({ cwd, model, goalMode }),
+          systemPrompt: buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() }),
         });
         session.goalMode = false;
+        session.agent = agentName;
         contextWindow = null;
         saveSession(session);
         ui.sessionId = session.id;
@@ -456,23 +536,7 @@ export async function startChatTui({
           ui.addNotice?.(`session not found: ${id}`, 'error');
           return;
         }
-        session = next;
-        model = next.model || model;
-        goalMode = !!next.goalMode;
-        contextWindow = Number(next.contextWindow) || null;
-        if (next.messages?.[0]?.role === 'system') {
-          next.messages[0].content = buildSystemPrompt({ cwd, model, goalMode });
-        }
-        ui.model = model;
-        ui.setGoalMode?.(goalMode);
-        ui.sessionId = next.id;
-        ui.sessionTitle = next.title || '';
-        refreshClient();
-        if (ui.resetSession) ui.resetSession(next.id, next.title || '', `resumed ${next.title || next.id.slice(0, 8)}`, next.messages);
-        else ui.mount(`resumed ${next.title || next.id.slice(0, 8)}`);
-        ui.setSessionUsage?.(next.usage, contextWindow, next.lastContextTokens);
-        ui.setContextWindow?.(contextWindow);
-        void refreshModelInfo();
+        activateSession(next, `resumed ${next.title || next.id.slice(0, 8)}`);
       },
       get accountUsage() {
         return accountUsage;
@@ -483,6 +547,8 @@ export async function startChatTui({
       get autoCompact() {
         return autoCompact;
       },
+      customCommands,
+      customAgents,
       async refreshUsage(show = false) {
         return refreshAccountUsage({ show });
       },
@@ -500,6 +566,37 @@ export async function startChatTui({
       },
       exportSession(targetPath) {
         return writeSessionExport(session, targetPath);
+      },
+      fork(title) {
+        const next = forkSession(session, { title });
+        activateSession(next, `forked from ${session.id.slice(0, 8)}`);
+        return next;
+      },
+      undo() {
+        const result = undoTurn(session);
+        if (result.ok) refreshSessionView('last turn undone');
+        return result;
+      },
+      redo() {
+        const result = redoTurn(session);
+        if (result.ok) refreshSessionView('last turn restored');
+        return result;
+      },
+      async retry() {
+        const result = undoTurn(session);
+        if (!result.ok) return result;
+        refreshSessionView('retrying last turn');
+        if (!result.prompt) return { ok: false, reason: 'Last turn has no user prompt.' };
+        await runOnce(result.prompt);
+        return { ok: true };
+      },
+      async copyLastAssistant() {
+        const message = [...(session.messages || [])].reverse().find((item) => item.role === 'assistant' && item.content);
+        if (!message) return false;
+        return copyText(message.content);
+      },
+      async runPrompt(text) {
+        return runOnce(text);
       },
     };
   }
@@ -536,6 +633,89 @@ export async function handleSlash(line, ctx) {
 
   if (c === 'compact' || c === 'compact-context') {
     await ctx.compact();
+    return true;
+  }
+
+  if (c === 'undo' || c === 'revert') {
+    const result = ctx.undo();
+    if (!result.ok) notify(ctx, result.reason, 'warning');
+    else if (result.shellChanges || result.filesSkipped) notify(ctx, `Undid the conversation · ${result.filesRestored} file(s) restored · ${result.filesSkipped} conflict(s) skipped · ${result.shellChanges} shell operation(s) not reverted.`, 'warning');
+    else notify(ctx, `Undid last turn · ${result.filesRestored} file(s) restored.`, 'success');
+    return true;
+  }
+
+  if (c === 'redo' || c === 'unrevert') {
+    const result = ctx.redo();
+    if (!result.ok) notify(ctx, result.reason, 'warning');
+    else if (result.shellChanges || result.filesSkipped) notify(ctx, `Restored the conversation · ${result.filesRestored} file(s) restored · ${result.filesSkipped} conflict(s) skipped · ${result.shellChanges} shell operation(s) not replayed.`, 'warning');
+    else notify(ctx, `Restored last turn · ${result.filesRestored} file(s) restored.`, 'success');
+    return true;
+  }
+
+  if (c === 'fork') {
+    const next = ctx.fork(arg || undefined);
+    notify(ctx, `Forked session ${next.id.slice(0, 8)}.`, 'success');
+    return true;
+  }
+
+  if (c === 'retry') {
+    const result = await ctx.retry();
+    if (!result.ok) notify(ctx, result.reason || 'Nothing to retry.', 'warning');
+    return true;
+  }
+
+  if (c === 'copy') {
+    const copied = await ctx.copyLastAssistant();
+    notify(ctx, copied ? 'Copied the last answer.' : 'No assistant answer to copy.', copied ? 'success' : 'warning');
+    return true;
+  }
+
+  if (c === 'search') {
+    if (!arg) {
+      notify(ctx, 'Usage: /search <text>', 'warning');
+      return true;
+    }
+    const query = arg.toLowerCase();
+    const rows = [];
+    for (const message of ctx.session.messages || []) {
+      if (!['user', 'assistant', 'tool'].includes(message.role)) continue;
+      const text = typeof message.content === 'string' ? message.content : JSON.stringify(message.content || '');
+      const index = text.toLowerCase().indexOf(query);
+      if (index < 0) continue;
+      const start = Math.max(0, index - 36);
+      rows.push([message.role, text.slice(start, start + 120).replace(/\s+/g, ' ')]);
+    }
+    showInfo(ctx, `Search · ${arg}`, rows.length ? rows : [['result', 'No matches']]);
+    return true;
+  }
+
+  if (c === 'agent') {
+    const options = [
+      { label: 'build', hint: 'default coding agent', action: 'build' },
+      ...((ctx.customAgents || []).map((agent) => ({ label: agent.name, hint: agent.description, action: agent.name }))),
+    ];
+    if (!arg) {
+      const picked = await pickOptions(ctx, {
+        title: 'Agents',
+        subtitle: `current  ${ctx.agent}`,
+        options,
+        initialIndex: Math.max(0, options.findIndex((item) => item.action === ctx.agent)),
+        searchable: true,
+      });
+      if (picked) ctx.agent = picked.action ?? picked;
+    } else {
+      const available = options.map((item) => item.action);
+      if (!available.includes(arg.toLowerCase())) notify(ctx, `Unknown agent: ${arg}`, 'warning');
+      else ctx.agent = arg;
+    }
+    return true;
+  }
+
+  const custom = (ctx.customCommands || []).find((command) => command.name === c);
+  if (custom) {
+    const prompt = renderCustomCommand(custom, arg);
+    if (!prompt) notify(ctx, `Custom command /${c} is empty.`, 'warning');
+    else await ctx.runPrompt(prompt);
     return true;
   }
 
@@ -631,6 +811,7 @@ export async function handleSlash(line, ctx) {
       ['version', VERSION],
       ['user', me.username || '—'],
       ['model', ctx.model],
+      ['agent', ctx.agent || 'build'],
       ['effort', ctx.effort],
       ['thinking', ctx.showThinking ? 'visible' : 'hidden'],
       ['goal mode', ctx.goalMode ? 'on · plan only' : 'off'],
@@ -777,9 +958,16 @@ function printHelp() {
   /credit [on|off]      show balance once or toggle header
   /credits              remaining account credits
   /compact              summarize old context and continue
+  /undo                 undo last turn and tracked file edits
+  /redo                 restore last undone turn
+  /fork [title]         branch from the current session
+  /retry                undo and rerun the last prompt
+  /copy                 copy the last assistant answer
+  /search <text>        search the current transcript
   /context              context estimate and compaction info
   /sessions             list and resume sessions
   /model [id]           list or switch model
+  /agent [name]         list or switch agent profile
   /effort [level]       reasoning: low|medium|high|xhigh|off
   /thinking             toggle reasoning display
   /details              toggle tool execution details
@@ -805,9 +993,16 @@ function showHelp(ctx) {
     ['/credit', 'show balance once or toggle header'],
     ['/credits', 'refresh account balance and key usage'],
     ['/compact', 'summarize old context and continue'],
+    ['/undo', 'undo last turn and tracked edits'],
+    ['/redo', 'restore last undone turn'],
+    ['/fork', 'branch from the current session'],
+    ['/retry', 'undo and rerun the last prompt'],
+    ['/copy', 'copy the last assistant answer'],
+    ['/search', 'search the current transcript'],
     ['/context', 'show context estimate and compactions'],
     ['/sessions', 'resume a saved session'],
     ['/model', 'search and switch model'],
+    ['/agent', 'list or switch agent profile'],
     ['/effort', 'set reasoning intensity'],
     ['/thinking', 'toggle reasoning display'],
     ['/details', 'toggle tool details'],

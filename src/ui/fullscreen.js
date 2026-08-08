@@ -23,9 +23,16 @@ const COMMANDS = [
   ['/credit', 'show balance or toggle header'],
   ['/credits', 'refresh remaining credits'],
   ['/compact', 'summarize old context'],
+  ['/undo', 'undo last turn and tracked edits'],
+  ['/redo', 'restore last undone turn'],
+  ['/fork', 'fork current session'],
+  ['/retry', 'undo and rerun last prompt'],
+  ['/copy', 'copy last assistant answer'],
+  ['/search', 'search current transcript'],
   ['/context', 'context size and compactions'],
   ['/sessions', 'resume a saved session'],
   ['/model', 'search and switch model'],
+  ['/agent', 'switch agent profile'],
   ['/effort', 'set reasoning intensity'],
   ['/thinking', 'toggle reasoning display'],
   ['/details', 'toggle tool details'],
@@ -45,11 +52,12 @@ const COMMANDS = [
   ['/q', 'quit'],
 ];
 
-export function createFullscreenChatUi({ model, mode, effort, goalMode = false, cwd, user, sessionId, sessionTitle = '', showThinking = true, showBalance = false, messages = [], input = '', sessionUsage = {}, contextWindow = null, contextTokens = null, accountUsage = null }) {
+export function createFullscreenChatUi({ model, mode, effort, agent = 'build', goalMode = false, cwd, user, sessionId, sessionTitle = '', showThinking = true, showBalance = false, commands = [], messages = [], input = '', sessionUsage = {}, contextWindow = null, contextTokens = null, accountUsage = null }) {
   const state = {
     model,
     mode,
     effort,
+    agent,
     goalMode,
     cwd,
     user,
@@ -72,6 +80,7 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     contextWindow: Number(contextWindow) || null,
     contextEstimate: Math.max(Number(contextTokens) || 0, estimateMessagesTokens(messages)),
     accountUsage,
+    commands: [...COMMANDS, ...commands.map((command) => [`/${command.name}`, command.description])],
     history: userMessageHistory(messages),
     historyIndex: userMessageHistory(messages).length,
     historyDraft: '',
@@ -89,6 +98,7 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
   let wasFlowing = null;
   let inputBuffer = '';
   let pasteMode = false;
+  let abortHandler = null;
 
   const PASTE_START = '\x1b[200~';
   const PASTE_END = '\x1b[201~';
@@ -184,6 +194,30 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     resolve(value);
   }
 
+  function submitAction(value) {
+    if (!inputResolve || state.busy) return false;
+    const resolve = inputResolve;
+    inputResolve = null;
+    state.busy = true;
+    renderNow();
+    resolve(value);
+    return true;
+  }
+
+  function openCommandPalette() {
+    if (state.busy || state.overlay) return;
+    void pick({
+      title: 'Commands',
+      subtitle: 'Run a workspace action',
+      options: state.commands
+        .filter(([command]) => !['/quit', '/q', '/clear'].includes(command))
+        .map(([command, description]) => ({ label: command, hint: description, action: command })),
+      searchable: true,
+    }).then((command) => {
+      if (command) submitAction(command);
+    });
+  }
+
   function onData(chunk) {
     if (!mounted) return;
     clearTimeout(escapeTimer);
@@ -270,11 +304,21 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     }
 
     if (key === '\u0003') {
-      terminate();
+      if (state.busy && abortHandler) {
+        abortHandler();
+        setNotice('Stopping generation…', 'warning');
+      } else {
+        terminate();
+      }
       return;
     }
 
     if (key === '\x1b') {
+      if (state.busy && abortHandler) {
+        abortHandler();
+        setNotice('Stopping generation…', 'warning');
+        return;
+      }
       if (state.input) {
         state.input = '';
         state.cursor = 0;
@@ -289,6 +333,9 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     if (key === '\x1b[A') return moveCommand(-1) || scrollBy(3);
     if (key === '\x1b[B') return moveCommand(1) || scrollBy(-3);
     if (state.busy) return;
+    if (key === '\u000b') return openCommandPalette();
+    if (key === '\u001a') return submitAction('/undo');
+    if (key === '\u0019') return submitAction('/redo');
     if (key === '\u0010') return moveHistory(-1);
     if (key === '\u000e') return moveHistory(1);
     if (key === '\t' && completeCommand()) return;
@@ -401,7 +448,7 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
   function commandSuggestions() {
     if (!/^\/[^\s]*$/.test(state.input)) return [];
     const query = state.input.slice(1).toLowerCase();
-    return COMMANDS.filter(([command]) => command.slice(1).startsWith(query)).slice(0, 5);
+    return state.commands.filter(([command]) => command.slice(1).startsWith(query)).slice(0, 5);
   }
 
   function moveCommand(amount) {
@@ -720,6 +767,7 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     const subtitle = clean(state.sessionTitle || `session ${state.sessionId.slice(0, 8)}`);
     const details = [busy];
     if (state.effort && state.effort !== 'off') details.push(t.dim(`effort ${state.effort}`));
+    if (state.agent && state.agent !== 'build') details.push(t.magenta(`agent ${state.agent}`));
     const balance = accountBalance(state.accountUsage);
     if (state.showBalance && balance != null) details.push(t.green(`₩${formatCompactCredits(balance)}`));
     const estimated = state.contextEstimate;
@@ -857,7 +905,7 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
           ? t.cyan('edits allowed')
           : t.dim('ask for writes');
     out.push(joinSides(`${t.accent('build')}  ${t.dim(state.model)}`, mode, width));
-    const notice = state.notice ? paintNotice(state.notice, state.noticeTone) : t.dim('Enter send  ·  / commands  ·  PgUp scroll  ·  Ctrl+C exit');
+    const notice = state.notice ? paintNotice(state.notice, state.noticeTone) : t.dim('Enter send  ·  Ctrl+K commands  ·  Ctrl+Z undo  ·  Esc stop');
     out.push(clipStyled(notice, width));
     return out;
   }
@@ -943,6 +991,7 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     set mode(value) { state.mode = value; renderSoon(); },
     get effort() { return state.effort; },
     set effort(value) { state.effort = value; renderSoon(); },
+    setAgent(value) { state.agent = value || 'build'; renderSoon(); },
     set sessionId(value) { state.sessionId = value; renderSoon(); },
     set sessionTitle(value) { state.sessionTitle = value || ''; renderSoon(); },
     setToolDetails(value) { state.showToolDetails = !!value; renderSoon(); },
@@ -957,6 +1006,11 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     setContextWindow(value) { state.contextWindow = Number(value) || null; renderSoon(); },
     setAccountUsage(value) { state.accountUsage = value || null; renderSoon(); },
     setShowBalance(value) { state.showBalance = !!value; renderSoon(); },
+    setAbortHandler(handler) { abortHandler = typeof handler === 'function' ? handler : null; },
+    setCommands(commands) {
+      state.commands = [...COMMANDS, ...commands.map((command) => [`/${command.name}`, command.description])];
+      renderSoon();
+    },
   };
 }
 

@@ -6,6 +6,7 @@ API: `https://api.cheapai.im/v1`
 - 설계: [docs/AGENT_SYSTEMS.md](./docs/AGENT_SYSTEMS.md)
 - 서버 인증: [docs/SERVER_CLI_AUTH.md](./docs/SERVER_CLI_AUTH.md)
 - TUI 사용법과 구조: [docs/TUI.md](./docs/TUI.md)
+- OpenCode 기능 대조: [docs/OPENCODE_PARITY.md](./docs/OPENCODE_PARITY.md)
 
 ## 설치
 
@@ -88,9 +89,12 @@ cheapai logout
 ```powershell
 cheapai
 cheapai "이 레포 설명해줘"
+cheapai run "이 레포 설명해줘" --print
 cheapai -p "한 번만 실행" --yolo
 cheapai -c
 cheapai --resume <session-id>
+cheapai --resume <session-id> --fork --title "alternate approach"
+cheapai --agent reviewer
 ```
 
 `--continue`는 현재 workspace의 가장 최근 세션을 재개하고, `/sessions`는
@@ -111,9 +115,16 @@ cheapai --resume <session-id>
 | `/credit [on|off]` | 현재 크레딧 한 줄 표시 또는 header 잔액 표시 설정 |
 | `/credits` | 계정 잔액·키 사용량 새로고침 |
 | `/compact` | 오래된 대화를 요약하고 현재 작업을 유지 |
+| `/undo` | 마지막 turn과 `write_file`/`edit_file` 변경 복원 |
+| `/redo` | 마지막 undo의 대화와 추적 파일 변경 재적용 |
+| `/fork [title]` | 현재 상태에서 새 세션으로 분기 |
+| `/retry` | 마지막 prompt를 undo 후 다시 실행 |
+| `/copy` | 마지막 assistant 답변을 clipboard에 복사 |
+| `/search <text>` | 현재 transcript 검색 |
 | `/context` | context 예상량과 자동 compact 상태 |
 | `/sessions` | 저장된 세션 선택 / 재개 |
 | `/model` | 검색 가능한 모델 선택 |
+| `/agent [name]` | 프로젝트 agent profile 선택 |
 | `/effort` | 추론 강도 변경 |
 | `/thinking` | 추론 표시 전환 |
 | `/details` | 도구 실행 상세 정보 전환 |
@@ -127,6 +138,12 @@ cheapai --resume <session-id>
 
 프로젝트 지침: `CHEAPAI.md` / `AGENTS.md` / `CLAUDE.md`
 
+사용자 command는 프로젝트의 `.opencode/commands/*.md`, `.cheapai/commands/*.md`
+또는 `~/.cheapai/commands/*.md`에 둘 수 있습니다. 파일명은 slash command가 되고,
+`$ARGUMENTS`와 `$1`, `$2`를 prompt template에 사용할 수 있습니다.
+Agent profile은 같은 위치의 `agents/*.md`에서 로드되며 `/agent` 또는
+`cheapai --agent <name>`으로 선택합니다.
+
 ## 설정
 
 `~/.cheapai/config.json`, `auth.json`, `sessions/`
@@ -135,8 +152,16 @@ cheapai --resume <session-id>
 cheapai config
 cheapai config --set model=claude-sonnet-5
 cheapai models
+cheapai models --verbose
+cheapai models --json
+cheapai agent list
 cheapai usage
 cheapai credits --json
+cheapai stats --project
+cheapai session list --project --json
+cheapai session fork <session-id> --title "experiment"
+cheapai export <session-id> --sanitize -o session.json
+cheapai import session.json
 ```
 
 기본 설정 디렉터리는 `~/.cheapai`입니다. 테스트나 격리된 실행에서는
@@ -147,6 +172,12 @@ cheapai credits --json
 실행에서 끌 수 있고, `compactThreshold`로 기준을 조정할 수 있습니다.
 잔액은 기본적으로 header에 표시하지 않습니다. `/credit`은 현재 잔액을 한 줄로
 확인하고, `/credit on`과 `/credit off`는 `showBalance` 설정을 저장합니다.
+
+`Ctrl+K`는 검색 가능한 command palette를 열고, `Ctrl+Z`/`Ctrl+Y`는 마지막
+turn을 undo/redo합니다. 실행 중 `Escape` 또는 `Ctrl+C`는 생성과 실행 중인 Bash를
+중단합니다. 파일 undo는 CheapAI가 `write_file`/`edit_file`로 직접 변경한 512KB
+이하 파일만 추적하며, 이후 사용자가 파일을 바꾼 경우 충돌로 판단해 덮어쓰지
+않습니다. Bash가 만든 변경은 자동으로 되돌리거나 재실행하지 않습니다.
 
 ## 개발
 

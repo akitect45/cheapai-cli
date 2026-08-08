@@ -6,7 +6,7 @@ import { findProjectInstructions } from '../config.js';
  * Claude Code–style system prompt: tool discipline, edit policy, environment facts.
  * Tools are also declared via OpenAI `tools` schema; this text steers *when/how* to use them.
  */
-export function buildSystemPrompt({ cwd, model, goalMode = false } = {}) {
+export function buildSystemPrompt({ cwd, model, goalMode = false, agentInstructions = '' } = {}) {
   const root = path.resolve(cwd || process.cwd());
   const instructions = findProjectInstructions(root);
   const projectBlocks = instructions
@@ -83,6 +83,10 @@ You are in goal mode. Define the desired outcome, success criteria, constraints,
 - Do not edit files or run shell commands in this mode, even if the user asks for implementation.
 - State the recommended next action, dependencies, risks, and any decision required from the user.
 - The user must leave goal mode with \`/goal off\` before you make workspace changes.
+` : ''}
+
+${agentInstructions ? `# Agent profile
+${agentInstructions}
 ` : ''}
 
 # Project instructions

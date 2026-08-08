@@ -32,6 +32,7 @@ export async function chatWithTools({
   reasoningEffort = null,
   onDelta,
   onThinking,
+  signal = null,
 }) {
   const body = {
     model,
@@ -55,13 +56,13 @@ export async function chatWithTools({
 
   let stream;
   try {
-    stream = await client.chat.completions.create(body);
+    stream = await client.chat.completions.create(body, signal ? { signal } : undefined);
   } catch (err) {
     // Retry without reasoning fields if rejected
     if (reasoningEffort && /reasoning|effort|unknown|unrecognized/i.test(String(err.message))) {
       delete body.reasoning_effort;
       delete body.extra_body;
-      stream = await client.chat.completions.create(body);
+      stream = await client.chat.completions.create(body, signal ? { signal } : undefined);
     } else {
       throw err;
     }

@@ -2,6 +2,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
+import { snapshotFile } from './history.js';
 
 export const TOOL_DEFINITIONS = [
   {
@@ -138,7 +139,7 @@ export const TOOL_DEFINITIONS = [
   },
 ];
 
-export function createToolRuntime({ cwd, onTodo } = {}) {
+export function createToolRuntime({ cwd, onTodo, onFileChange, onBash } = {}) {
   const root = path.resolve(cwd || process.cwd());
   let todos = [];
 
@@ -148,7 +149,7 @@ export function createToolRuntime({ cwd, onTodo } = {}) {
     return abs;
   }
 
-  async function runBash(command, timeout_ms = 120_000) {
+  async function runBash(command, timeout_ms = 120_000, signal) {
     return new Promise((resolve) => {
       const [shell, args] = shellInvocation(command);
       const child = spawn(shell, args, {
@@ -158,9 +159,21 @@ export function createToolRuntime({ cwd, onTodo } = {}) {
       });
       let stdout = '';
       let stderr = '';
+      let settled = false;
+      const finish = (result) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        signal?.removeEventListener('abort', abort);
+        resolve(result);
+      };
+      const abort = () => {
+        child.kill('SIGTERM');
+        finish({ ok: false, exit_code: null, aborted: true, stdout: stdout.slice(-30_000), stderr: stderr.slice(-20_000) });
+      };
       const timer = setTimeout(() => {
         child.kill('SIGTERM');
-        resolve({
+        finish({
           ok: false,
           exit_code: null,
           timed_out: true,
@@ -177,8 +190,7 @@ export function createToolRuntime({ cwd, onTodo } = {}) {
         if (stderr.length > 100_000) stderr = stderr.slice(-80_000);
       });
       child.on('close', (code) => {
-        clearTimeout(timer);
-        resolve({
+        finish({
           ok: code === 0,
           exit_code: code,
           timed_out: false,
@@ -187,9 +199,10 @@ export function createToolRuntime({ cwd, onTodo } = {}) {
         });
       });
       child.on('error', (err) => {
-        clearTimeout(timer);
-        resolve({ ok: false, exit_code: null, error: String(err), stdout, stderr });
+        finish({ ok: false, exit_code: null, error: String(err), stdout, stderr });
       });
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) abort();
     });
   }
 
@@ -212,14 +225,18 @@ export function createToolRuntime({ cwd, onTodo } = {}) {
 
   function writeFile(filePath, content) {
     const abs = resolveSafe(filePath);
+    const before = snapshotFile(abs);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
     fs.writeFileSync(abs, content, 'utf8');
+    const after = snapshotFile(abs);
+    onFileChange?.({ path: abs, before, after, restorable: before.restorable !== false && after.restorable !== false });
     return { ok: true, path: abs, bytes: Buffer.byteLength(content, 'utf8') };
   }
 
   function editFile(filePath, old_string, new_string, replace_all = false) {
     const abs = resolveSafe(filePath);
     if (!fs.existsSync(abs)) return { error: `File not found: ${abs}` };
+    const before = snapshotFile(abs);
     const text = fs.readFileSync(abs, 'utf8');
     if (!text.includes(old_string)) {
       return { error: 'old_string not found in file' };
@@ -230,6 +247,8 @@ export function createToolRuntime({ cwd, onTodo } = {}) {
     }
     const next = replace_all ? text.split(old_string).join(new_string) : text.replace(old_string, new_string);
     fs.writeFileSync(abs, next, 'utf8');
+    const after = snapshotFile(abs);
+    onFileChange?.({ path: abs, before, after, restorable: before.restorable !== false && after.restorable !== false });
     return { ok: true, path: abs, replacements: replace_all ? count : 1 };
   }
 
@@ -334,10 +353,11 @@ export function createToolRuntime({ cwd, onTodo } = {}) {
     return { matches, truncated: matches.length >= max_matches };
   }
 
-  async function execute(name, args) {
+  async function execute(name, args, { signal } = {}) {
     switch (name) {
       case 'bash':
-        return runBash(args.command, args.timeout_ms || 120_000);
+        onBash?.(args.command);
+        return runBash(args.command, args.timeout_ms || 120_000, signal);
       case 'read_file':
         return readFile(args.path, args.offset, args.limit);
       case 'write_file':

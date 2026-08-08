@@ -61,14 +61,16 @@ Fullscreen TUI는 프로세스가 종료되거나 `Ctrl+C`가 입력될 때 raw 
 | `End` / `Ctrl+E` | 입력 끝으로 이동 |
 | `Backspace` / `Delete` | 문자 삭제 |
 | `Ctrl+U` | 현재 입력 전체 삭제 |
-| `Escape` | 입력을 비우거나 스크롤 위치를 초기화 |
+| `Escape` | 실행 중이면 생성/Bash 중단, 대기 중이면 입력 또는 스크롤 초기화 |
 | `PageUp` / `PageDown` | 대화 스크롤 |
 | `Up` / `Down` | 대화 스크롤 |
 | mouse wheel | 대화 viewport 스크롤 |
 | `Ctrl+P` / `Ctrl+N` | 이전 프롬프트 / 다음 프롬프트 |
+| `Ctrl+K` | 검색 가능한 command palette |
+| `Ctrl+Z` / `Ctrl+Y` | 마지막 turn undo / redo |
 | `/` + `Up` / `Down` | 명령 제안 선택 |
 | `/` + `Tab` | 선택한 명령 자동 완성 |
-| `Ctrl+C` | CLI 종료 및 터미널 복구 |
+| `Ctrl+C` | 실행 중이면 중단, 대기 중이면 CLI 종료 및 터미널 복구 |
 | bracketed paste | 여러 줄 붙여넣기 |
 
 붙여넣기 모드에서는 터미널이 보내는 bracketed paste marker를 제거하고
@@ -120,6 +122,12 @@ CLI 프로세스가 종료될 때까지 유지됩니다. 설정 파일에 영구
 검색과 todo 갱신만 가능하고 파일 수정과 Bash는 차단됩니다. `/goal off`로 일반
 작업 모드로 돌아갈 수 있으며 상태는 세션에 저장됩니다.
 
+Custom command는 프로젝트의 `.opencode/commands/*.md`, `.cheapai/commands/*.md`
+또는 `~/.cheapai/commands/*.md`에서 로드됩니다. 파일명은 `/command`가 되고
+본문은 prompt template입니다. `$ARGUMENTS`, `$1`, `$2`로 인자를 받을 수 있습니다.
+Agent profile은 `.opencode/agents/*.md`, `.cheapai/agents/*.md`,
+`~/.cheapai/agents/*.md`에서 로드하고 `/agent` picker로 선택합니다.
+
 ## Slash 명령
 
 | 명령 | 설명 |
@@ -130,9 +138,16 @@ CLI 프로세스가 종료될 때까지 유지됩니다. 설정 파일에 영구
 | `/credit [on|off]` | 현재 잔액 한 줄 표시 또는 header 잔액 표시 설정 |
 | `/credits`, `/balance` | 서버에서 계정 잔액·키 사용량 새로고침 |
 | `/compact` | 이전 대화를 모델 요약으로 축약하고 최신 exchange 유지 |
+| `/undo`, `/revert` | 마지막 turn 제거 및 추적 가능한 파일 변경 복원 |
+| `/redo`, `/unrevert` | 마지막 undo의 대화와 추적 파일 변경 재적용 |
+| `/fork [title]` | 현재 대화 상태를 새 세션 ID로 분기 |
+| `/retry` | 마지막 prompt를 undo하고 다시 실행 |
+| `/copy` | 마지막 assistant 답변을 시스템 clipboard에 복사 |
+| `/search <text>` | 현재 session transcript 검색 |
 | `/context` | 예상 context 크기, window, 자동 compact 상태 표시 |
 | `/sessions` | 현재 workspace의 저장된 세션을 선택하고 재개 |
 | `/model [id]` | 모델 picker를 열거나 모델 ID를 직접 지정 |
+| `/agent [name]` | project/user agent profile 선택 |
 | `/effort [level]` | `off`, `low`, `medium`, `high`, `xhigh` 설정 |
 | `/thinking` | reasoning 표시 전환 |
 | `/details` | 도구 실행 상세 정보 전환 |
@@ -157,6 +172,13 @@ CLI 프로세스가 종료될 때까지 유지됩니다. 설정 파일에 영구
 $env:CHEAPAI_HOME = "$HOME\.cheapai-work"
 cheapai --continue
 cheapai --resume <session-id>
+cheapai run "이번 작업을 검토해줘" --print
+cheapai models --verbose
+cheapai --resume <session-id> --fork
+cheapai session list --project
+cheapai stats --project
+cheapai export <session-id> --sanitize -o session.json
+cheapai import session.json
 ```
 
 세션에는 다음 정보가 포함됩니다.
@@ -168,10 +190,17 @@ cheapai --resume <session-id>
 - system, user, assistant, tool message history
 - 누적 input/output token, 비용, 마지막 context 크기
 - compaction 횟수와 전후 예상 token
+- 부모 세션 ID, undo/redo checkpoint와 직접 편집한 파일 snapshot
 
 `--continue`는 현재 workspace에서 가장 최근에 저장된 세션을 찾습니다.
 `/sessions`는 같은 workspace의 세션을 수정 시각 순으로 표시합니다. 세션
 전환 시 대화 viewport도 저장된 user/assistant 메시지로 다시 채워집니다.
+
+Undo history는 최근 20개 turn, 최대 약 2MB로 제한됩니다. `write_file`과
+`edit_file`로 바뀐 512KB 이하 파일은 전후 snapshot을 저장합니다. 현재 파일이
+기록된 snapshot과 달라졌으면 사용자 변경을 보호하기 위해 복원을 건너뜁니다.
+`bash`는 임의의 외부 상태를 바꿀 수 있으므로 대화는 undo하되 shell 변경은
+자동 복원하지 않습니다.
 
 ## 인증과 credential
 
@@ -207,6 +236,8 @@ src/agent/loop.js      streaming LLM loop, tool lifecycle, session persistence
 src/agent/usage.js     token/cost 집계, context 추정과 usage 표시 형식
 src/agent/compact.js   대화 요약과 context compaction
 src/agent/export.js    Markdown transcript export
+src/agent/history.js   turn checkpoint, 파일 snapshot, undo/redo
+src/agent/commands.js   project/user custom command loader와 template renderer
 src/agent/permissions.js permission policy와 approval fallback
 src/agent/session.js   session JSON 저장, continue/resume 조회
 ```

@@ -14,6 +14,19 @@ import { showAuthWelcome } from './ui/welcome.js';
 import { runBrowserAuthFlow, runApiKeyAuthFlow } from './ui/device-auth.js';
 import { startChatTui } from './ui/chat.js';
 import { accountUsageRows } from './agent/usage.js';
+import {
+  deleteSession,
+  exportSessionData,
+  findLatestSession,
+  forkSession,
+  importSessionData,
+  listAllSessions,
+  loadSession,
+  sessionStats,
+} from './agent/session.js';
+import fs from 'node:fs';
+import path from 'node:path';
+import { loadCustomAgents } from './agent/commands.js';
 
 export async function main(argv = process.argv) {
   const program = new Command();
@@ -26,6 +39,9 @@ export async function main(argv = process.argv) {
     .option('-m, --model <model>', 'Model id')
     .option('-c, --continue', 'Continue latest session', false)
     .option('--resume <id>', 'Resume session by id')
+    .option('--fork', 'Fork the resumed or latest session before continuing', false)
+    .option('--title <title>', 'Set the session title')
+    .option('--agent <name>', 'Agent profile')
     .option('--cwd <dir>', 'Working directory', process.cwd())
     .option('--yolo', 'Auto-approve tools', false)
     .option('--permission-mode <mode>', 'ask | auto | accept-edits | yolo')
@@ -80,12 +96,24 @@ export async function main(argv = process.argv) {
     console.log(JSON.stringify(info, null, 2));
   });
 
-  program.command('models').action(async () => {
+  program
+    .command('models')
+    .option('--verbose', 'Show context and pricing metadata', false)
+    .option('--json', 'Print JSON', false)
+    .action(async (opts) => {
     try {
       const { client, baseURL } = createClient();
       const models = await listModels(client);
+      if (opts.json) {
+        console.log(JSON.stringify(models, null, 2));
+        return;
+      }
       console.log(`base: ${baseURL}`);
-      for (const m of models) console.log(`- ${m.id}`);
+      for (const m of models) {
+        const context = m.context_window || m.contextWindow || m.max_tokens;
+        const pricing = m.pricing ? `  in ${m.pricing.input ?? m.pricing.prompt}/out ${m.pricing.output ?? m.pricing.completion}` : '';
+        console.log(`- ${m.id}${opts.verbose ? `  context ${context || '—'}${pricing}` : ''}`);
+      }
     } catch (err) {
       // public list
       try {
@@ -101,12 +129,91 @@ export async function main(argv = process.argv) {
     }
   });
 
+  const runCommand = program.command('run [prompt...]').description('Run a prompt in the coding workspace');
+  runCommand
+    .option('-p, --print', 'Headless one-shot', false)
+    .option('-m, --model <model>', 'Model id')
+    .option('-c, --continue', 'Continue latest session', false)
+    .option('--resume <id>', 'Resume session by id')
+    .option('--fork', 'Fork the resumed or latest session', false)
+    .option('--title <title>', 'Set the session title')
+    .option('--agent <name>', 'Agent profile')
+    .option('--cwd <dir>', 'Working directory', process.cwd())
+    .option('--yolo', 'Auto-approve tools', false)
+    .option('--permission-mode <mode>', 'ask | auto | accept-edits | yolo')
+    .option('--effort <level>', 'reasoning effort: low|medium|high|xhigh|off')
+    .option('--max-turns <n>', 'Max tool loops', (value) => Number(value))
+    .option('--no-auto-compact', 'Disable automatic context compaction')
+    .action(async (promptParts, opts) => {
+      await boot({ prompt: promptParts.join(' ').trim(), opts });
+    });
+
   program
     .command('usage')
-    .alias('stats')
     .description('Show account credits and recent API usage')
     .option('--json', 'Print raw JSON', false)
     .action(async (opts) => printAccountUsage(opts));
+
+  program
+    .command('stats')
+    .description('Show local session, token, model, and tool statistics')
+    .option('--days <n>', 'Only sessions updated in the last N days', (value) => Number(value))
+    .option('--project [dir]', 'Filter by workspace (defaults to current directory)')
+    .option('--json', 'Print JSON', false)
+    .option('--format <format>', 'Output format', 'table')
+    .action((opts) => printLocalStats(opts));
+
+  const sessionCommand = program.command('session').description('Manage local sessions');
+  sessionCommand
+    .command('list')
+    .description('List sessions')
+    .option('-n, --max-count <n>', 'Limit results', (value) => Number(value), 20)
+    .option('--project [dir]', 'Filter by workspace (defaults to current directory)')
+    .option('--json', 'Print JSON', false)
+    .option('--format <format>', 'Output format', 'table')
+    .action((opts) => printSessions(opts));
+  sessionCommand
+    .command('delete <id>')
+    .description('Delete a session')
+    .action((id) => {
+      if (!deleteSession(id)) throw new Error(`Session not found: ${id}`);
+      console.log(`✓ deleted ${id}`);
+    });
+  sessionCommand
+    .command('fork <id>')
+    .description('Fork a session')
+    .option('--title <title>', 'Title for the fork')
+    .action((id, opts) => {
+      const source = loadSession(id);
+      if (!source) throw new Error(`Session not found: ${id}`);
+      const fork = forkSession(source, { title: opts.title });
+      console.log(fork.id);
+    });
+
+  const agentCommand = program.command('agent').description('Manage project agent profiles');
+  agentCommand
+    .command('list')
+    .description('List available agents')
+    .option('--cwd <dir>', 'Project directory', process.cwd())
+    .option('--json', 'Print JSON', false)
+    .action((opts) => {
+      const agents = [{ name: 'build', description: 'default coding agent' }, ...loadCustomAgents(opts.cwd)];
+      if (opts.json) console.log(JSON.stringify(agents, null, 2));
+      else for (const agent of agents) console.log(`${agent.name.padEnd(18)} ${agent.description}`);
+    });
+
+  program
+    .command('export [sessionId]')
+    .description('Export a session as JSON')
+    .option('-o, --output <file>', 'Write to a file instead of stdout')
+    .option('--sanitize', 'Redact tool output and undo snapshots', false)
+    .action((sessionId, opts) => exportSessionCommand(sessionId, opts));
+
+  program
+    .command('import <file>')
+    .description('Import a CheapAI session JSON file')
+    .option('--cwd <dir>', 'Override imported workspace')
+    .action(async (file, opts) => importSessionCommand(file, opts));
 
   program
     .command('credits')
@@ -160,6 +267,97 @@ async function printAccountUsage(opts = {}) {
     console.error('✗', error.message || error);
     process.exitCode = 1;
   }
+}
+
+function filteredSessions(opts = {}) {
+  let sessions = listAllSessions();
+  if (opts.project !== undefined) {
+    const target = path.resolve(typeof opts.project === 'string' ? opts.project : process.cwd());
+    sessions = sessions.filter((session) => path.resolve(session.cwd || '') === target);
+  }
+  if (Number(opts.days) > 0) {
+    const after = Date.now() - Number(opts.days) * 86_400_000;
+    sessions = sessions.filter((session) => new Date(session.updatedAt || 0).getTime() >= after);
+  }
+  return sessions;
+}
+
+function printSessions(opts = {}) {
+  const sessions = filteredSessions(opts).slice(0, Math.max(1, Number(opts.maxCount) || 20));
+  if (opts.json || opts.format === 'json') {
+    console.log(JSON.stringify(sessions.map(sessionSummary), null, 2));
+    return;
+  }
+  if (!sessions.length) {
+    console.log('No sessions.');
+    return;
+  }
+  console.log('ID        Updated           Model                 Title');
+  for (const session of sessions) {
+    const updated = new Date(session.updatedAt || session.createdAt || 0).toLocaleString();
+    console.log(`${session.id.slice(0, 8).padEnd(10)}${updated.slice(0, 17).padEnd(18)}${String(session.model || '—').slice(0, 20).padEnd(22)}${session.title || 'Untitled session'}`);
+  }
+}
+
+function sessionSummary(session) {
+  return {
+    id: session.id,
+    parentId: session.parentId || null,
+    cwd: session.cwd,
+    model: session.model,
+    title: session.title,
+    createdAt: session.createdAt,
+    updatedAt: session.updatedAt,
+    messages: Math.max(0, (session.messages || []).length - 1),
+    usage: session.usage || {},
+    compactions: session.compactions?.length || 0,
+  };
+}
+
+function printLocalStats(opts = {}) {
+  const stats = sessionStats(filteredSessions(opts));
+  if (opts.json || opts.format === 'json') {
+    console.log(JSON.stringify(stats, null, 2));
+    return;
+  }
+  console.log('CheapAI local stats');
+  console.log(`  sessions       ${stats.sessions}`);
+  console.log(`  messages       ${stats.messages}`);
+  console.log(`  tokens         ${stats.totalTokens.toLocaleString()}`);
+  console.log(`  input / output ${stats.inputTokens.toLocaleString()} / ${stats.outputTokens.toLocaleString()}`);
+  console.log(`  billed         ₩${stats.credits.toLocaleString()}`);
+  console.log(`  compactions    ${stats.compactions}`);
+  const models = Object.entries(stats.models).sort((a, b) => b[1] - a[1]);
+  if (models.length) console.log(`  models         ${models.map(([name, count]) => `${name} ${count}`).join(', ')}`);
+  const tools = Object.entries(stats.tools).sort((a, b) => b[1] - a[1]);
+  if (tools.length) console.log(`  tools          ${tools.map(([name, count]) => `${name} ${count}`).join(', ')}`);
+}
+
+function exportSessionCommand(sessionId, opts = {}) {
+  const session = sessionId ? loadSession(sessionId) : findLatestSession(process.cwd());
+  if (!session) throw new Error(sessionId ? `Session not found: ${sessionId}` : 'No session for this workspace.');
+  const json = `${JSON.stringify(exportSessionData(session, { sanitize: opts.sanitize }), null, 2)}\n`;
+  if (!opts.output) {
+    process.stdout.write(json);
+    return;
+  }
+  const destination = path.resolve(opts.output);
+  fs.mkdirSync(path.dirname(destination), { recursive: true });
+  fs.writeFileSync(destination, json, 'utf8');
+  console.log(`✓ exported ${destination}`);
+}
+
+async function importSessionCommand(file, opts = {}) {
+  let text;
+  if (/^https?:\/\//i.test(file)) {
+    const response = await fetch(file);
+    if (!response.ok) throw new Error(`Import failed (${response.status})`);
+    text = await response.text();
+  } else {
+    text = fs.readFileSync(path.resolve(file), 'utf8');
+  }
+  const session = importSessionData(JSON.parse(text), { cwd: opts.cwd || process.cwd() });
+  console.log(session.id);
 }
 
 function collect(value, prev) {

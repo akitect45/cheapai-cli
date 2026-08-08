@@ -69,6 +69,8 @@ export async function compactSession({ client, model, session }) {
     };
   }
   session.messages = compactedMessages;
+  session.undoStack = [];
+  session.redoStack = [];
   session.compactions = [
     ...(Array.isArray(session.compactions) ? session.compactions : []),
     {

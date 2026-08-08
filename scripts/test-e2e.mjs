@@ -38,6 +38,10 @@ console.log('cheapai e2e\n');
   if (!goalPrompt.includes('# Goal mode') || !goalPrompt.includes('/goal off')) {
     bad('goal system prompt', new Error('goal instructions missing'));
   } else ok('goal system prompt');
+  const agentPrompt = buildSystemPrompt({ cwd: root, model: 'test-model', agentInstructions: 'Review security boundaries first.' });
+  if (!agentPrompt.includes('# Agent profile') || !agentPrompt.includes('Review security boundaries first.')) {
+    bad('agent profile prompt', new Error('agent instructions missing'));
+  } else ok('agent profile prompt');
 }
 
 // 2) tools runtime
@@ -376,6 +380,128 @@ console.log('cheapai e2e\n');
   }
 }
 
+// 4c) OpenCode-style session history, fork, import/export, and cancellation
+{
+  const savedHome = process.env.CHEAPAI_HOME;
+  const tmp = path.join(os.tmpdir(), `cheapai-history-${Date.now()}`);
+  process.env.CHEAPAI_HOME = path.join(tmp, '.cheapai');
+  try {
+    fs.mkdirSync(tmp, { recursive: true });
+    fs.mkdirSync(path.join(tmp, '.opencode', 'commands'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.opencode', 'commands', 'review.md'), '---\ndescription: Review the current diff\n---\nReview $ARGUMENTS, then report blockers.', 'utf8');
+    fs.mkdirSync(path.join(tmp, '.cheapai', 'agents'), { recursive: true });
+    fs.writeFileSync(path.join(tmp, '.cheapai', 'agents', 'security.md'), '---\ndescription: Security reviewer\n---\nReview trust boundaries before edits.', 'utf8');
+    const {
+      beginTurn,
+      finishTurn,
+      recordFileChange,
+      redoTurn,
+      undoTurn,
+    } = await import('../src/agent/history.js');
+    const {
+      exportSessionData,
+      forkSession,
+      importSessionData,
+      sessionStats,
+    } = await import('../src/agent/session.js');
+    const { createToolRuntime } = await import('../src/agent/tools.js');
+    const { loadCustomAgents, loadCustomCommands, renderCustomCommand } = await import('../src/agent/commands.js');
+
+    const customCommands = loadCustomCommands(tmp);
+    if (customCommands[0]?.name !== 'review' || renderCustomCommand(customCommands[0], 'the API') !== 'Review the API, then report blockers.') {
+      bad('custom command templates', new Error(JSON.stringify(customCommands)));
+    } else ok('custom command templates');
+    const customAgents = loadCustomAgents(tmp);
+    if (customAgents[0]?.name !== 'security' || !customAgents[0].instructions.includes('trust boundaries')) {
+      bad('custom agent profiles', new Error(JSON.stringify(customAgents)));
+    } else ok('custom agent profiles');
+
+    const file = path.join(tmp, 'history.txt');
+    fs.writeFileSync(file, 'before\n', 'utf8');
+    const session = {
+      id: 'history-session',
+      cwd: tmp,
+      model: 'test-model',
+      title: 'History test',
+      createdAt: new Date().toISOString(),
+      messages: [{ role: 'system', content: 'system' }],
+      usage: {},
+    };
+    const checkpoint = beginTurn(session);
+    const runtime = createToolRuntime({
+      cwd: tmp,
+      onFileChange: (change) => recordFileChange(checkpoint, change),
+    });
+    session.messages.push({ role: 'user', content: 'edit the file' });
+    await runtime.execute('edit_file', {
+      path: file,
+      old_string: 'before',
+      new_string: 'after',
+    });
+    session.messages.push({ role: 'assistant', content: 'edited' });
+    finishTurn(session, checkpoint);
+
+    const undone = undoTurn(session);
+    if (!undone.ok || fs.readFileSync(file, 'utf8') !== 'before\n' || session.messages.length !== 1) {
+      bad('turn undo with file restore', new Error(JSON.stringify(undone)));
+    } else ok('turn undo with file restore');
+
+    const redone = redoTurn(session);
+    if (!redone.ok || fs.readFileSync(file, 'utf8') !== 'after\n' || session.messages.at(-1)?.content !== 'edited') {
+      bad('turn redo with file restore', new Error(JSON.stringify(redone)));
+    } else ok('turn redo with file restore');
+
+    const conflictCheckpoint = beginTurn(session);
+    const conflictRuntime = createToolRuntime({
+      cwd: tmp,
+      onFileChange: (change) => recordFileChange(conflictCheckpoint, change),
+    });
+    session.messages.push({ role: 'user', content: 'edit again' });
+    await conflictRuntime.execute('edit_file', {
+      path: file,
+      old_string: 'after',
+      new_string: 'agent change',
+    });
+    session.messages.push({ role: 'assistant', content: 'edited again' });
+    finishTurn(session, conflictCheckpoint);
+    fs.writeFileSync(file, 'external change\n', 'utf8');
+    const conflictUndo = undoTurn(session);
+    if (!conflictUndo.ok || conflictUndo.filesSkipped !== 1 || fs.readFileSync(file, 'utf8') !== 'external change\n') {
+      bad('undo conflict protection', new Error(JSON.stringify(conflictUndo)));
+    } else ok('undo conflict protection');
+
+    session.messages.push({
+      role: 'assistant',
+      content: null,
+      tool_calls: [{ id: 'call_1', type: 'function', function: { name: 'edit_file', arguments: '{}' } }],
+    });
+    const fork = forkSession(session, { title: 'Forked history' });
+    const exported = exportSessionData(fork, { sanitize: true });
+    const imported = importSessionData(exported, { cwd: tmp });
+    const stats = sessionStats([fork, imported]);
+    if (fork.parentId !== session.id || imported.parentId !== fork.id || stats.sessions !== 2 || stats.tools.edit_file !== 2) {
+      bad('session fork import export stats', new Error(JSON.stringify({ fork, imported, stats })));
+    } else ok('session fork import export stats');
+
+    const abortRuntime = createToolRuntime({ cwd: tmp });
+    const controller = new AbortController();
+    const running = abortRuntime.execute('bash', {
+      command: 'node -e "setTimeout(() => {}, 5000)"',
+      timeout_ms: 10_000,
+    }, { signal: controller.signal });
+    setTimeout(() => controller.abort(), 50);
+    const aborted = await running;
+    if (!aborted.aborted) bad('bash cancellation', new Error(JSON.stringify(aborted)));
+    else ok('bash cancellation');
+  } catch (error) {
+    bad('session history checks', error);
+  } finally {
+    if (savedHome === undefined) delete process.env.CHEAPAI_HOME;
+    else process.env.CHEAPAI_HOME = savedHome;
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
 // 5) menu fallback safety
 {
   const { resolveMenuAnswer } = await import('../src/ui/select.js');
@@ -477,6 +603,21 @@ console.log('cheapai e2e\n');
   if (!slashFrame.includes('/help') || !slashFrame.includes('/status')) {
     bad('slash command suggestions', new Error('dropdown suggestions missing'));
   } else ok('slash command suggestions');
+
+  const extensionUi = createFullscreenChatUi({
+    model: 'claude-sonnet-5',
+    mode: 'ask',
+    effort: 'off',
+    agent: 'security',
+    commands: [{ name: 'review', description: 'Review the current diff' }],
+    cwd: root,
+    sessionId: '12345678',
+    input: '/rev',
+  });
+  const extensionFrame = extensionUi.renderSnapshot(100, 28);
+  if (!extensionFrame.includes('/review') || !extensionFrame.includes('agent security')) {
+    bad('agent and custom command frame', new Error('agent label or custom command missing'));
+  } else ok('agent and custom command frame');
 
   const koreanUi = createFullscreenChatUi({
     model: 'claude-sonnet-5',
