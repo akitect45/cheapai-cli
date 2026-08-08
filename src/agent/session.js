@@ -100,6 +100,9 @@ export function createSession({ cwd, model, systemPrompt }) {
     createdAt: new Date().toISOString(),
     updatedAt: new Date().toISOString(),
     title: '',
+    usage: {},
+    contextWindow: null,
+    compactions: [],
     messages: [{ role: 'system', content: systemPrompt }],
   };
 }

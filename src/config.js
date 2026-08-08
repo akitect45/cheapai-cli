@@ -69,6 +69,9 @@ export function loadConfig() {
     temperature: 0.2,
     reasoningEffort: 'off',
     showThinking: true,
+    showBalance: false,
+    autoCompact: true,
+    compactThreshold: 0.8,
   };
   if (!fs.existsSync(p)) return defaults;
   try {

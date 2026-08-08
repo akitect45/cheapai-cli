@@ -1,5 +1,5 @@
 import { Command } from 'commander';
-import { createClient, listModels } from './llm/client.js';
+import { createClient, fetchAccountUsage, listModels } from './llm/client.js';
 import { interactiveLogin, logout, whoami, openBrowser } from './auth.js';
 import {
   loadConfig,
@@ -13,6 +13,7 @@ import { VERSION, t } from './ui/theme.js';
 import { showAuthWelcome } from './ui/welcome.js';
 import { runBrowserAuthFlow, runApiKeyAuthFlow } from './ui/device-auth.js';
 import { startChatTui } from './ui/chat.js';
+import { accountUsageRows } from './agent/usage.js';
 
 export async function main(argv = process.argv) {
   const program = new Command();
@@ -30,6 +31,7 @@ export async function main(argv = process.argv) {
     .option('--permission-mode <mode>', 'ask | auto | accept-edits | yolo')
     .option('--effort <level>', 'reasoning effort: low|medium|high|xhigh|off')
     .option('--max-turns <n>', 'Max tool loops', (v) => parseInt(v, 10))
+    .option('--no-auto-compact', 'Disable automatic context compaction')
     .option('--login', 'Force auth picker even if already signed in', false)
     .action(async (promptParts, opts) => {
       const prompt = promptParts.join(' ').trim();
@@ -100,6 +102,20 @@ export async function main(argv = process.argv) {
   });
 
   program
+    .command('usage')
+    .alias('stats')
+    .description('Show account credits and recent API usage')
+    .option('--json', 'Print raw JSON', false)
+    .action(async (opts) => printAccountUsage(opts));
+
+  program
+    .command('credits')
+    .alias('balance')
+    .description('Show remaining CheapAI credits')
+    .option('--json', 'Print raw JSON', false)
+    .action(async (opts) => printAccountUsage(opts));
+
+  program
     .command('config')
     .option('--set <key=value>', 'Set config', collect, [])
     .action((opts) => {
@@ -126,6 +142,24 @@ export async function main(argv = process.argv) {
   });
 
   await program.parseAsync(argv);
+}
+
+async function printAccountUsage(opts = {}) {
+  try {
+    const { baseURL, apiKey } = createClient();
+    const usage = await fetchAccountUsage({ baseURL, apiKey });
+    if (opts.json) {
+      console.log(JSON.stringify(usage, null, 2));
+      return;
+    }
+    console.log('CheapAI usage');
+    for (const [key, value] of accountUsageRows(usage)) {
+      console.log(`  ${String(key).padEnd(14)} ${value}`);
+    }
+  } catch (error) {
+    console.error('✗', error.message || error);
+    process.exitCode = 1;
+  }
 }
 
 function collect(value, prev) {

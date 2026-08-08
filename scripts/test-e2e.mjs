@@ -174,6 +174,116 @@ console.log('cheapai e2e\n');
   }
 }
 
+// 3c) usage, session accounting, and compaction
+{
+  const {
+    contextUsageLabel,
+    estimateMessagesTokens,
+    formatCompactCredits,
+    mergeSessionUsage,
+  } = await import('../src/agent/usage.js');
+  const { fetchAccountUsage } = await import('../src/llm/client.js');
+  const savedFetch = globalThis.fetch;
+  const savedHome = process.env.CHEAPAI_HOME;
+  const tmpHome = path.join(os.tmpdir(), `cheapai-usage-${Date.now()}`);
+  try {
+    const merged = mergeSessionUsage({}, {
+      prompt_tokens: 1200,
+      completion_tokens: 300,
+      cost_credits: 42.5,
+      cost_usd: 0.0425,
+    });
+    if (merged.requests !== 1 || merged.totalTokens !== 1500 || merged.credits !== 42.5) {
+      bad('session usage accounting', new Error(JSON.stringify(merged)));
+    } else ok('session usage accounting');
+
+    if (!contextUsageLabel(10_000, 20_000).includes('50%') || formatCompactCredits(12_345) !== '12.3k') {
+      bad('usage formatting', new Error(contextUsageLabel(10_000, 20_000)));
+    } else ok('usage formatting');
+
+    globalThis.fetch = async (url, options) => {
+      if (url !== 'https://api.example/v1/usage' || options.headers.Authorization !== 'Bearer csk_test') {
+        throw new Error(`unexpected usage request: ${url}`);
+      }
+      return new Response(JSON.stringify({ object: 'cheapai.usage', balance: 9000, spentToday: 100 }), { status: 200 });
+    };
+    const remote = await fetchAccountUsage({ baseURL: 'https://api.example/v1', apiKey: 'csk_test' });
+    if (remote.balance !== 9000 || remote.spentToday !== 100) bad('usage endpoint client', remote);
+    else ok('usage endpoint client');
+
+    process.env.CHEAPAI_HOME = tmpHome;
+    fs.mkdirSync(tmpHome, { recursive: true });
+    const { compactSession } = await import('../src/agent/compact.js');
+    const session = {
+      id: 'usage-test-session',
+      cwd: tmpHome,
+      model: 'test-model',
+      title: 'Compaction test',
+      messages: [
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'first task ' + 'context '.repeat(550) },
+        { role: 'assistant', content: 'first answer ' + 'implementation '.repeat(550) },
+        { role: 'user', content: 'latest task' },
+        { role: 'assistant', content: 'latest answer' },
+      ],
+    };
+    const fakeClient = {
+      chat: {
+        completions: {
+          async create() {
+            return {
+              choices: [{ message: { content: 'Goal: preserve the latest task and continue the implementation.' } }],
+              usage: { prompt_tokens: 50, completion_tokens: 20, cost_credits: 1 },
+            };
+          },
+        },
+      },
+    };
+    const compacted = await compactSession({ client: fakeClient, model: 'test-model', session });
+    if (!compacted.compacted || session.messages.map((m) => m.role).join(',') !== 'system,user,assistant,user,assistant' || !session.compactions.length) {
+      bad('session compaction', new Error(JSON.stringify({ compacted, roles: session.messages.map((m) => m.role) })));
+    } else ok('session compaction');
+
+    const unchanged = {
+      id: 'usage-test-unchanged',
+      cwd: tmpHome,
+      model: 'test-model',
+      title: 'No reduction test',
+      messages: [
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'older task ' + 'context '.repeat(550) },
+        { role: 'assistant', content: 'older answer ' + 'implementation '.repeat(550) },
+        { role: 'user', content: 'latest task' },
+        { role: 'assistant', content: 'latest answer' },
+      ],
+    };
+    const originalMessages = JSON.stringify(unchanged.messages);
+    const expandingClient = {
+      chat: {
+        completions: {
+          async create() {
+            return {
+              choices: [{ message: { content: 'expanded summary '.repeat(2000) } }],
+              usage: { prompt_tokens: 50, completion_tokens: 20 },
+            };
+          },
+        },
+      },
+    };
+    const notCompacted = await compactSession({ client: expandingClient, model: 'test-model', session: unchanged });
+    if (notCompacted.compacted || JSON.stringify(unchanged.messages) !== originalMessages) {
+      bad('non-reducing compaction', new Error('original session was replaced'));
+    } else ok('non-reducing compaction');
+  } catch (error) {
+    bad('usage/compaction checks', error);
+  } finally {
+    globalThis.fetch = savedFetch;
+    if (savedHome === undefined) delete process.env.CHEAPAI_HOME;
+    else process.env.CHEAPAI_HOME = savedHome;
+    try { fs.rmSync(tmpHome, { recursive: true, force: true }); } catch { /* ignore */ }
+  }
+}
+
 // 4) terminal rendering primitives
 {
   const { displayWidth, panel, statusBar, stripAnsi, wrapAnsi } = await import('../src/ui/draw.js');
@@ -222,6 +332,47 @@ console.log('cheapai e2e\n');
   } finally {
     if (columnsDescriptor) Object.defineProperty(process.stdout, 'columns', columnsDescriptor);
     else delete process.stdout.columns;
+  }
+}
+
+// 4b) convenience commands and transcript export
+{
+  const { handleSlash } = await import('../src/ui/chat.js');
+  const { exportSession } = await import('../src/agent/export.js');
+  const notices = [];
+  let showBalance = false;
+  const ctx = {
+    ui: { addNotice: (message, tone) => notices.push({ message, tone }) },
+    get showBalance() { return showBalance; },
+    set showBalance(value) { showBalance = !!value; },
+    async refreshUsage() { return { balance: 12345.5 }; },
+  };
+  await handleSlash('/credit', ctx);
+  await handleSlash('/credit on', ctx);
+  if (!notices.some((item) => item.message.includes('₩12,345.5')) || !showBalance) {
+    bad('credit slash command', new Error(JSON.stringify({ notices, showBalance })));
+  } else ok('credit slash command');
+
+  const tmp = path.join(os.tmpdir(), `cheapai-export-${Date.now()}`);
+  try {
+    fs.mkdirSync(tmp, { recursive: true });
+    const destination = exportSession({
+      id: 'export-session',
+      cwd: tmp,
+      model: 'test-model',
+      title: 'Export test',
+      messages: [
+        { role: 'system', content: 'system' },
+        { role: 'user', content: 'question' },
+        { role: 'assistant', content: 'answer' },
+      ],
+    }, 'transcript.md');
+    const markdown = fs.readFileSync(destination, 'utf8');
+    if (!markdown.includes('# Export test') || !markdown.includes('## User') || !markdown.includes('## Assistant')) {
+      bad('session Markdown export', new Error(markdown));
+    } else ok('session Markdown export');
+  } finally {
+    try { fs.rmSync(tmp, { recursive: true, force: true }); } catch { /* ignore */ }
   }
 }
 
@@ -280,6 +431,10 @@ console.log('cheapai e2e\n');
     effort: 'off',
     cwd: root,
     sessionId: '12345678-1234-1234-1234-123456789abc',
+    sessionUsage: { lastInputTokens: 4000 },
+    contextWindow: 10000,
+    contextTokens: 4000,
+    accountUsage: { balance: 12345 },
   });
   for (const [columns, rows] of [[10, 8], [40, 16], [80, 24], [120, 36]]) {
     const frame = ui.renderSnapshot(columns, rows);
@@ -290,6 +445,15 @@ console.log('cheapai e2e\n');
       bad(`fullscreen frame ${columns}x${rows}`, new Error('missing composer or status'));
     } else ok(`fullscreen frame ${columns}x${rows}`);
   }
+  const defaultUsageFrame = ui.renderSnapshot(120, 36);
+  if (defaultUsageFrame.includes('₩12.3k') || !defaultUsageFrame.includes('ctx 40%')) {
+    bad('usage status frame default', new Error('balance should be hidden while context remains visible'));
+  } else ok('usage status frame default');
+  ui.setShowBalance(true);
+  const visibleUsageFrame = ui.renderSnapshot(120, 36);
+  if (!visibleUsageFrame.includes('₩12.3k')) {
+    bad('usage status frame enabled', new Error('enabled balance missing'));
+  } else ok('usage status frame enabled');
 
   ui.resetSession('87654321', 'Resumed work', '', [
     { role: 'system', content: 'system' },

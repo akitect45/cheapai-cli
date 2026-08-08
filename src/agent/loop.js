@@ -2,6 +2,7 @@ import { chatWithTools } from '../llm/client.js';
 import { TOOL_DEFINITIONS, createToolRuntime } from './tools.js';
 import { createPermissionGate } from './permissions.js';
 import { saveSession } from './session.js';
+import { mergeSessionUsage, normalizeUsage } from './usage.js';
 
 const GOAL_TOOL_NAMES = new Set(['read_file', 'glob', 'grep', 'todo_write']);
 
@@ -54,7 +55,7 @@ export async function runAgentLoop({
   if (!session.title) session.title = sessionTitle(userText);
 
   let finalText = '';
-  let totalUsage = { prompt_tokens: 0, completion_tokens: 0 };
+  let totalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cost_credits: 0, cost_usd: 0 };
 
   for (let turn = 1; turn <= maxTurns; turn++) {
     if (ui?.onThinking) ui.onThinking(turn);
@@ -85,8 +86,18 @@ export async function runAgentLoop({
     });
 
     if (result.usage) {
-      totalUsage.prompt_tokens += result.usage.prompt_tokens || 0;
-      totalUsage.completion_tokens += result.usage.completion_tokens || 0;
+      const usage = normalizeUsage(result.usage);
+      totalUsage.prompt_tokens += usage.inputTokens;
+      totalUsage.completion_tokens += usage.outputTokens;
+      totalUsage.total_tokens += usage.totalTokens;
+      totalUsage.cost_credits += usage.credits;
+      totalUsage.cost_usd += usage.usd;
+      totalUsage.cost_krw = totalUsage.cost_credits;
+      totalUsage.last_prompt_tokens = usage.inputTokens;
+      totalUsage.last_completion_tokens = usage.outputTokens;
+      session.usage = mergeSessionUsage(session.usage, result.usage);
+      session.lastContextTokens = usage.inputTokens;
+      saveSession(session);
     }
 
     if (result.tool_calls?.length) {
@@ -188,7 +199,7 @@ export async function runAgentLoop({
     else if (!print) console.log(`\x1b[33m${finalText}\x1b[0m`);
   }
 
-  return { text: finalText, session, usage: totalUsage };
+  return { text: finalText, session, usage: totalUsage, contextTokens: session.lastContextTokens || 0 };
 }
 
 function sessionTitle(value) {

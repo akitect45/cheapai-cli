@@ -107,12 +107,19 @@ cheapai --resume <session-id>
 | `/ask` | 도구 확인 |
 | `/accept-edits` | 파일 수정 자동 |
 | `/status` | 세션 정보 |
+| `/usage` | 현재 세션 토큰·비용과 계정 사용액 |
+| `/credit [on|off]` | 현재 크레딧 한 줄 표시 또는 header 잔액 표시 설정 |
+| `/credits` | 계정 잔액·키 사용량 새로고침 |
+| `/compact` | 오래된 대화를 요약하고 현재 작업을 유지 |
+| `/context` | context 예상량과 자동 compact 상태 |
 | `/sessions` | 저장된 세션 선택 / 재개 |
 | `/model` | 검색 가능한 모델 선택 |
 | `/effort` | 추론 강도 변경 |
 | `/thinking` | 추론 표시 전환 |
 | `/details` | 도구 실행 상세 정보 전환 |
 | `/goal [on|off]` | 읽기·검색 기반 목표 계획 모드 |
+| `/rename <title>` | 현재 세션 이름 변경 |
+| `/export [path]` | Markdown transcript 내보내기 |
 
 ## 도구
 
@@ -128,11 +135,18 @@ cheapai --resume <session-id>
 cheapai config
 cheapai config --set model=claude-sonnet-5
 cheapai models
+cheapai usage
+cheapai credits --json
 ```
 
 기본 설정 디렉터리는 `~/.cheapai`입니다. 테스트나 격리된 실행에서는
 `CHEAPAI_HOME`으로 저장 위치를 변경할 수 있습니다. API 키는
 `CHEAPAI_API_KEY`, `CHEAPSUB_API_KEY` 순서로 환경변수도 확인합니다.
+`autoCompact`가 켜져 있으면 모델 context window의 80%에 가까워질 때 CLI가
+이전 대화를 요약해 세션을 계속 유지합니다. `--no-auto-compact`로 한 번의
+실행에서 끌 수 있고, `compactThreshold`로 기준을 조정할 수 있습니다.
+잔액은 기본적으로 header에 표시하지 않습니다. `/credit`은 현재 잔액을 한 줄로
+확인하고, `/credit on`과 `/credit off`는 `showBalance` 설정을 저장합니다.
 
 ## 개발
 

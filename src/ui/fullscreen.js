@@ -8,17 +8,30 @@ import {
   stripAnsi,
   wrapAnsi,
 } from './draw.js';
+import {
+  accountBalance,
+  estimateMessagesTokens,
+  formatCompactCredits,
+  formatTokens,
+} from '../agent/usage.js';
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
 const COMMANDS = [
   ['/help', 'show commands'],
   ['/status', 'session and runtime info'],
+  ['/usage', 'session tokens and account spend'],
+  ['/credit', 'show balance or toggle header'],
+  ['/credits', 'refresh remaining credits'],
+  ['/compact', 'summarize old context'],
+  ['/context', 'context size and compactions'],
   ['/sessions', 'resume a saved session'],
   ['/model', 'search and switch model'],
   ['/effort', 'set reasoning intensity'],
   ['/thinking', 'toggle reasoning display'],
   ['/details', 'toggle tool details'],
   ['/goal', 'toggle goal planning mode'],
+  ['/rename', 'rename current session'],
+  ['/export', 'export Markdown transcript'],
   ['/ask', 'ask before writes'],
   ['/accept-edits', 'allow file edits'],
   ['/yolo', 'allow all tools'],
@@ -32,7 +45,7 @@ const COMMANDS = [
   ['/q', 'quit'],
 ];
 
-export function createFullscreenChatUi({ model, mode, effort, goalMode = false, cwd, user, sessionId, sessionTitle = '', showThinking = true, messages = [], input = '' }) {
+export function createFullscreenChatUi({ model, mode, effort, goalMode = false, cwd, user, sessionId, sessionTitle = '', showThinking = true, showBalance = false, messages = [], input = '', sessionUsage = {}, contextWindow = null, contextTokens = null, accountUsage = null }) {
   const state = {
     model,
     mode,
@@ -50,10 +63,18 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     busy: false,
     showToolDetails: false,
     showThinking,
+    showBalance,
     overlay: null,
     notice: '',
     noticeTone: 'muted',
     usage: null,
+    sessionUsage: sessionUsage || {},
+    contextWindow: Number(contextWindow) || null,
+    contextEstimate: Math.max(Number(contextTokens) || 0, estimateMessagesTokens(messages)),
+    accountUsage,
+    history: userMessageHistory(messages),
+    historyIndex: userMessageHistory(messages).length,
+    historyDraft: '',
     frame: 0,
     activeThinking: null,
   };
@@ -153,6 +174,9 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     if (!value || !inputResolve || state.busy) return;
     state.input = '';
     state.cursor = 0;
+    if (state.history.at(-1) !== value) state.history.push(value);
+    state.historyIndex = state.history.length;
+    state.historyDraft = '';
     state.busy = true;
     const resolve = inputResolve;
     inputResolve = null;
@@ -265,6 +289,8 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     if (key === '\x1b[A') return moveCommand(-1) || scrollBy(3);
     if (key === '\x1b[B') return moveCommand(1) || scrollBy(-3);
     if (state.busy) return;
+    if (key === '\u0010') return moveHistory(-1);
+    if (key === '\u000e') return moveHistory(1);
     if (key === '\t' && completeCommand()) return;
     if (key === '\x1b[D') return moveCursor(-1);
     if (key === '\x1b[C') return moveCursor(1);
@@ -397,6 +423,18 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     return true;
   }
 
+  function moveHistory(amount) {
+    if (!state.history.length) return;
+    if (state.historyIndex === state.history.length) state.historyDraft = state.input;
+    state.historyIndex = Math.max(0, Math.min(state.history.length, state.historyIndex + amount));
+    state.input = state.historyIndex === state.history.length
+      ? state.historyDraft
+      : state.history[state.historyIndex];
+    state.cursor = [...state.input].length;
+    state.commandIndex = 0;
+    renderSoon();
+  }
+
   function stopThinking() {
     if (state.activeThinking) state.activeThinking.active = false;
     state.activeThinking = null;
@@ -462,13 +500,17 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
 
   function writeUser(text) {
     state.entries.push({ type: 'user', text: String(text) });
+    state.contextEstimate += Math.ceil(String(text).length / 4) + 12;
     state.scroll = 0;
     state.busy = true;
     renderSoon();
   }
 
-  function writeUsage(usage) {
+  function writeUsage(usage, sessionUsage, contextWindow, contextTokens) {
     state.usage = usage;
+    if (sessionUsage) state.sessionUsage = sessionUsage;
+    if (contextWindow != null) state.contextWindow = Number(contextWindow) || null;
+    if (contextTokens != null) state.contextEstimate = Number(contextTokens) || state.contextEstimate;
     const assistant = [...state.entries].reverse().find((entry) => entry.type === 'assistant');
     if (assistant) assistant.usage = usage;
     renderSoon();
@@ -513,10 +555,14 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     state.sessionTitle = title;
     state.entries = hydrateMessages(messages);
     state.usage = null;
+    state.contextEstimate = estimateMessagesTokens(messages);
     state.scroll = 0;
     state.input = '';
     state.cursor = 0;
     state.commandIndex = 0;
+    state.history = userMessageHistory(messages);
+    state.historyIndex = state.history.length;
+    state.historyDraft = '';
     state.activeThinking = null;
     if (notice) setNotice(notice, 'success');
     renderNow();
@@ -672,7 +718,18 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     const rightText = `${t.cyan(clipCells(clean(state.model), Math.max(8, Math.floor(contentWidth * 0.3))))}  ${workspaceMode}`;
     screen[0] = offsetLine(joinSides(leftText, rightText, contentWidth), left);
     const subtitle = clean(state.sessionTitle || `session ${state.sessionId.slice(0, 8)}`);
-    const meta = state.effort && state.effort !== 'off' ? `${busy}  ${t.dim(`effort ${state.effort}`)}` : busy;
+    const details = [busy];
+    if (state.effort && state.effort !== 'off') details.push(t.dim(`effort ${state.effort}`));
+    const balance = accountBalance(state.accountUsage);
+    if (state.showBalance && balance != null) details.push(t.green(`₩${formatCompactCredits(balance)}`));
+    const estimated = state.contextEstimate;
+    if (estimated) {
+      const context = state.contextWindow
+        ? `ctx ${Math.min(999, Math.round((estimated / state.contextWindow) * 100))}%`
+        : `ctx ${formatTokens(estimated)}`;
+      details.push(t.dim(context));
+    }
+    const meta = details.join(t.dim('  ·  '));
     screen[1] = offsetLine(joinSides(t.dim(clipCells(subtitle, Math.max(8, contentWidth - 28))), meta, contentWidth), left);
     screen[2] = offsetLine(t.border('─'.repeat(contentWidth)), left);
   }
@@ -725,8 +782,10 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     body.forEach((line, index) => lines.push(`${index === 0 ? t.accent('✦') : ' '}  ${t.agent(line)}`));
     if (entry.completedAt || entry.usage) {
       const elapsed = entry.completedAt && entry.startedAt ? ` · ${((entry.completedAt - entry.startedAt) / 1000).toFixed(1)}s` : '';
-      const usage = entry.usage ? ` · ${entry.usage.prompt_tokens || 0} in / ${entry.usage.completion_tokens || 0} out` : '';
-      lines.push(t.dim(`   ${state.model}${elapsed}${usage}`));
+      const usage = entry.usage ? ` · ${formatTokens(entry.usage.prompt_tokens || 0)} in / ${formatTokens(entry.usage.completion_tokens || 0)} out` : '';
+      const costValue = entry.usage?.cost_credits ?? entry.usage?.cost_krw;
+      const cost = Number(costValue) > 0 ? ` · ₩${formatCompactCredits(costValue)}` : '';
+      lines.push(t.dim(`   ${state.model}${elapsed}${usage}${cost}`));
     }
   }
 
@@ -889,6 +948,15 @@ export function createFullscreenChatUi({ model, mode, effort, goalMode = false, 
     setToolDetails(value) { state.showToolDetails = !!value; renderSoon(); },
     setThinkingVisible(value) { state.showThinking = !!value; renderSoon(); },
     setGoalMode(value) { state.goalMode = !!value; renderSoon(); },
+    setSessionUsage(value, contextWindow, contextTokens) {
+      state.sessionUsage = value || {};
+      if (contextTokens != null) state.contextEstimate = Number(contextTokens) || state.contextEstimate;
+      if (contextWindow != null) state.contextWindow = Number(contextWindow) || null;
+      renderSoon();
+    },
+    setContextWindow(value) { state.contextWindow = Number(value) || null; renderSoon(); },
+    setAccountUsage(value) { state.accountUsage = value || null; renderSoon(); },
+    setShowBalance(value) { state.showBalance = !!value; renderSoon(); },
   };
 }
 
@@ -1010,4 +1078,11 @@ function hydrateMessages(messages) {
     }
   }
   return entries;
+}
+
+function userMessageHistory(messages) {
+  return (messages || [])
+    .filter((message) => message?.role === 'user' && message.content && !String(message.content).startsWith('[Previous conversation summary]'))
+    .map((message) => String(message.content))
+    .slice(-100);
 }

@@ -65,6 +65,7 @@ Fullscreen TUI는 프로세스가 종료되거나 `Ctrl+C`가 입력될 때 raw 
 | `PageUp` / `PageDown` | 대화 스크롤 |
 | `Up` / `Down` | 대화 스크롤 |
 | mouse wheel | 대화 viewport 스크롤 |
+| `Ctrl+P` / `Ctrl+N` | 이전 프롬프트 / 다음 프롬프트 |
 | `/` + `Up` / `Down` | 명령 제안 선택 |
 | `/` + `Tab` | 선택한 명령 자동 완성 |
 | `Ctrl+C` | CLI 종료 및 터미널 복구 |
@@ -125,12 +126,19 @@ CLI 프로세스가 종료될 때까지 유지됩니다. 설정 파일에 영구
 |------|------|
 | `/help` | 명령 목록 표시 |
 | `/status` | 인증, 모델, 세션, workspace와 runtime 정보 표시 |
+| `/usage`, `/stats` | 현재 세션 토큰·비용과 계정 사용액 표시 |
+| `/credit [on|off]` | 현재 잔액 한 줄 표시 또는 header 잔액 표시 설정 |
+| `/credits`, `/balance` | 서버에서 계정 잔액·키 사용량 새로고침 |
+| `/compact` | 이전 대화를 모델 요약으로 축약하고 최신 exchange 유지 |
+| `/context` | 예상 context 크기, window, 자동 compact 상태 표시 |
 | `/sessions` | 현재 workspace의 저장된 세션을 선택하고 재개 |
 | `/model [id]` | 모델 picker를 열거나 모델 ID를 직접 지정 |
 | `/effort [level]` | `off`, `low`, `medium`, `high`, `xhigh` 설정 |
 | `/thinking` | reasoning 표시 전환 |
 | `/details` | 도구 실행 상세 정보 전환 |
 | `/goal [on|off]` | 목표·완료 기준·실행 계획을 만드는 계획 전용 모드 |
+| `/rename <title>` | 현재 세션 제목 변경 |
+| `/export [path]` | 세션을 Markdown transcript로 저장. 경로 생략 시 `~/.cheapai/exports/` |
 | `/ask` | 쓰기 도구 승인 요청 모드 |
 | `/accept-edits` | 파일 편집과 todo를 자동 허용 |
 | `/yolo` | 모든 도구 자동 허용 |
@@ -158,6 +166,8 @@ cheapai --resume <session-id>
 - 모델과 생성/수정 시각
 - 첫 사용자 입력에서 생성한 세션 제목
 - system, user, assistant, tool message history
+- 누적 input/output token, 비용, 마지막 context 크기
+- compaction 횟수와 전후 예상 token
 
 `--continue`는 현재 workspace에서 가장 최근에 저장된 세션을 찾습니다.
 `/sessions`는 같은 workspace의 세션을 수정 시각 순으로 표시합니다. 세션
@@ -194,6 +204,9 @@ src/ui/draw.js         terminal width, CJK/emoji 폭, wrapping, tool summary
 src/ui/theme.js        ANSI semantic theme와 NO_COLOR 처리
 src/ui/input.js        masked secret input
 src/agent/loop.js      streaming LLM loop, tool lifecycle, session persistence
+src/agent/usage.js     token/cost 집계, context 추정과 usage 표시 형식
+src/agent/compact.js   대화 요약과 context compaction
+src/agent/export.js    Markdown transcript export
 src/agent/permissions.js permission policy와 approval fallback
 src/agent/session.js   session JSON 저장, continue/resume 조회
 ```

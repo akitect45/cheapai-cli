@@ -15,7 +15,9 @@ import {
 } from './draw.js';
 import {
   createClient,
+  fetchAccountUsage,
   listModels,
+  modelInfo,
   persistModel,
   persistEffort,
 } from '../llm/client.js';
@@ -39,6 +41,16 @@ import { runAgentLoop } from '../agent/loop.js';
 import { DEFAULT_WEB_ORIGIN } from '../config.js';
 import { selectMenu } from './select.js';
 import { createFullscreenChatUi } from './fullscreen.js';
+import { compactSession } from '../agent/compact.js';
+import { exportSession as writeSessionExport } from '../agent/export.js';
+import {
+  accountUsageRows,
+  contextUsageLabel,
+  estimateMessagesTokens,
+  formatTokens,
+  formatWon,
+  sessionUsageRows,
+} from '../agent/usage.js';
 
 /**
  * Append-only interactive chat for a focused coding workspace.
@@ -68,11 +80,16 @@ export async function startChatTui({
     : opts.permissionMode || cfg.permissionMode || 'ask';
   const maxTurns = opts.maxTurns || cfg.maxTurns || 40;
   let showThinking = cfg.showThinking !== false;
+  let showBalance = cfg.showBalance === true;
   let showToolDetails = false;
   let goalMode = !!session?.goalMode;
+  let contextWindow = Number(session?.contextWindow) || null;
+  let accountUsage = null;
+  const autoCompact = opts.autoCompact ?? cfg.autoCompact !== false;
+  const compactThreshold = Math.min(0.95, Math.max(0.5, Number(cfg.compactThreshold) || 0.8));
   const me = whoami();
 
-  let { client } = createClient({ model });
+  let { client, baseURL, apiKey } = createClient({ model });
 
   if (!session) {
     session = createSession({
@@ -89,6 +106,7 @@ export async function startChatTui({
     if (session.messages?.[0]?.role === 'system') {
       session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode });
     }
+    saveSession(session);
   }
 
   const fullscreen = !print && input.isTTY && output.isTTY;
@@ -102,6 +120,11 @@ export async function startChatTui({
     sessionTitle: session.title,
     showThinking,
     goalMode,
+    sessionUsage: session.usage,
+    contextWindow,
+    contextTokens: session.lastContextTokens,
+    accountUsage,
+    showBalance,
     messages: session.messages,
   }) : createChatUi({
     model,
@@ -115,10 +138,92 @@ export async function startChatTui({
   });
 
   function refreshClient() {
-    ({ client } = createClient({ model }));
+    ({ client, baseURL, apiKey } = createClient({ model }));
+  }
+
+  async function refreshModelInfo() {
+    try {
+      const info = await modelInfo(client, model);
+      const nextWindow = Number(info?.context_window || info?.contextWindow || 0);
+      if (nextWindow > 0) {
+        contextWindow = nextWindow;
+        session.contextWindow = nextWindow;
+        saveSession(session);
+        ui.setContextWindow?.(contextWindow);
+      }
+    } catch {
+      // Context metadata is optional; usage and chat remain available without it.
+    }
+    return contextWindow;
+  }
+
+  async function refreshAccountUsage({ show = false } = {}) {
+    try {
+      accountUsage = await fetchAccountUsage({ baseURL, apiKey });
+      ui.setAccountUsage?.(accountUsage);
+      if (show) showInfo(uiContext(), 'Account usage', accountUsageRows(accountUsage));
+      return accountUsage;
+    } catch (error) {
+      if (show) notify(uiContext(), `Usage unavailable: ${error.message}`, 'error');
+      return null;
+    }
+  }
+
+  async function compactCurrent({ silent = false } = {}) {
+    if (print) return { compacted: false, reason: 'Compaction is unavailable in print mode.' };
+    ui.setBusy?.(true);
+    if (!silent) ui.writeContext('compacting conversation…');
+    try {
+      const result = await compactSession({ client, model, session });
+      if (result.compacted) {
+        ui.resetSession?.(session.id, session.title || '', '', session.messages);
+        ui.setSessionUsage?.(session.usage, contextWindow, session.lastContextTokens);
+        ui.addNotice?.(
+          `context compacted  ${formatTokens(result.beforeTokens)} → ${formatTokens(result.afterTokens)} tokens`,
+          'success',
+        );
+      } else if (!silent) {
+        ui.addNotice?.(result.reason || 'Nothing to compact.', 'muted');
+      }
+      return result;
+    } catch (error) {
+      if (!silent) ui.addNotice?.(`Compaction failed: ${error.message}`, 'error');
+      return { compacted: false, reason: error.message, error };
+    } finally {
+      ui.setBusy?.(false);
+    }
+  }
+
+  async function maybeAutoCompact(text) {
+    if (!autoCompact || !contextWindow || print) return;
+    const localEstimate = estimateMessagesTokens([
+      ...(session.messages || []),
+      { role: 'user', content: text },
+    ]);
+    const recentEstimate = Number(session.lastContextTokens || 0)
+      + estimateMessagesTokens([{ role: 'user', content: text }]);
+    const estimate = Math.max(localEstimate, recentEstimate);
+    if (estimate < contextWindow * compactThreshold) return;
+    ui.writeContext(`context near limit  ${formatTokens(estimate)} / ${formatTokens(contextWindow)}`);
+    await compactCurrent({ silent: true });
+  }
+
+  function uiContext() {
+    return {
+      ui,
+      session,
+      get model() { return model; },
+      get effort() { return reasoningEffort; },
+      get showThinking() { return showThinking; },
+      get goalMode() { return goalMode; },
+      get permissionMode() { return permissionMode; },
+      get autoCompact() { return autoCompact; },
+      cwd,
+    };
   }
 
   const runOnce = async (text) => {
+    await maybeAutoCompact(text);
     if (!print) ui.writeUser(text);
     const result = await runAgentLoop({
       client,
@@ -141,7 +246,10 @@ export async function startChatTui({
       requestPermission: ui.requestPermission || null,
       ui: print ? null : ui.agentHooks(),
     });
-    if (!print && result.usage) ui.writeUsage(result.usage);
+    if (!print && result.usage) {
+      ui.writeUsage(result.usage, session.usage, contextWindow, session.lastContextTokens);
+    }
+    if (!print && showBalance) void refreshAccountUsage();
     if (!print) ui.sessionTitle = session.title;
     ui.setBusy?.(false);
     return result;
@@ -163,6 +271,8 @@ export async function startChatTui({
   if (fullscreen) {
     try {
       ui.mount();
+      void refreshModelInfo();
+      if (showBalance) void refreshAccountUsage();
       if (prompt) {
         try {
           await runOnce(prompt);
@@ -196,6 +306,8 @@ export async function startChatTui({
   // Append-only fallback for terminals without full-screen capabilities.
   restoreCookedTty();
   ui.mount();
+  void refreshModelInfo();
+  if (showBalance) void refreshAccountUsage();
 
   if (prompt) {
     await runOnce(prompt);
@@ -234,19 +346,27 @@ export async function startChatTui({
   function createSlashContext() {
     return {
       ui,
-      session,
+      get session() {
+        return session;
+      },
       get model() {
         return model;
       },
       set model(value) {
         model = value;
         session.model = value;
+        session.contextWindow = null;
+        session.lastContextTokens = estimateMessagesTokens(session.messages || []);
+        contextWindow = null;
         ui.model = value;
+        ui.setContextWindow?.(null);
         persistModel(value);
         if (session.messages?.[0]?.role === 'system') {
           session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode });
         }
+        saveSession(session);
         refreshClient();
+        void refreshModelInfo();
         ui.writeContext('model updated');
       },
       get effort() {
@@ -282,6 +402,16 @@ export async function startChatTui({
       get goalMode() {
         return goalMode;
       },
+      get showBalance() {
+        return showBalance;
+      },
+      set showBalance(value) {
+        showBalance = !!value;
+        ui.setShowBalance?.(showBalance);
+        const config = loadConfig();
+        config.showBalance = showBalance;
+        saveConfig(config);
+      },
       set goalMode(value) {
         goalMode = !!value;
         session.goalMode = goalMode;
@@ -304,12 +434,16 @@ export async function startChatTui({
           systemPrompt: buildSystemPrompt({ cwd, model, goalMode }),
         });
         session.goalMode = false;
+        contextWindow = null;
         saveSession(session);
         ui.sessionId = session.id;
         ui.sessionTitle = '';
         ui.setGoalMode?.(false);
         if (ui.resetSession) ui.resetSession(session.id, '', `new session ${session.id.slice(0, 8)}`, session.messages);
         else ui.mount(`new session ${session.id.slice(0, 8)}`);
+        ui.setSessionUsage?.(session.usage, contextWindow, session.lastContextTokens);
+        ui.setContextWindow?.(contextWindow);
+        void refreshModelInfo();
       },
       toggleToolDetails() {
         showToolDetails = !showToolDetails;
@@ -325,6 +459,7 @@ export async function startChatTui({
         session = next;
         model = next.model || model;
         goalMode = !!next.goalMode;
+        contextWindow = Number(next.contextWindow) || null;
         if (next.messages?.[0]?.role === 'system') {
           next.messages[0].content = buildSystemPrompt({ cwd, model, goalMode });
         }
@@ -335,12 +470,42 @@ export async function startChatTui({
         refreshClient();
         if (ui.resetSession) ui.resetSession(next.id, next.title || '', `resumed ${next.title || next.id.slice(0, 8)}`, next.messages);
         else ui.mount(`resumed ${next.title || next.id.slice(0, 8)}`);
+        ui.setSessionUsage?.(next.usage, contextWindow, next.lastContextTokens);
+        ui.setContextWindow?.(contextWindow);
+        void refreshModelInfo();
+      },
+      get accountUsage() {
+        return accountUsage;
+      },
+      get contextWindow() {
+        return contextWindow;
+      },
+      get autoCompact() {
+        return autoCompact;
+      },
+      async refreshUsage(show = false) {
+        return refreshAccountUsage({ show });
+      },
+      async compact() {
+        return compactCurrent();
+      },
+      rename(title) {
+        const value = String(title || '').trim().replace(/\s+/g, ' ').slice(0, 80);
+        if (!value) return false;
+        session.title = value;
+        saveSession(session);
+        ui.sessionTitle = value;
+        ui.writeContext('session renamed');
+        return true;
+      },
+      exportSession(targetPath) {
+        return writeSessionExport(session, targetPath);
       },
     };
   }
 }
 
-async function handleSlash(line, ctx) {
+export async function handleSlash(line, ctx) {
   const [cmd, ...rest] = line.slice(1).split(/\s+/);
   const arg = rest.join(' ').trim();
   const c = cmd.toLowerCase();
@@ -366,6 +531,74 @@ async function handleSlash(line, ctx) {
       return true;
     }
     ctx.goalMode = value ? value === 'on' : !ctx.goalMode;
+    return true;
+  }
+
+  if (c === 'compact' || c === 'compact-context') {
+    await ctx.compact();
+    return true;
+  }
+
+  if (c === 'usage' || c === 'stats') {
+    const account = await ctx.refreshUsage(false);
+    const contextTokens = currentContextTokens(ctx.session);
+    const rows = [
+      ...sessionUsageRows(ctx.session.usage, contextTokens, ctx.contextWindow),
+      ['account balance', account ? formatWon(account.balance ?? account.credits) : 'unavailable'],
+      ['today', account ? formatWon(account.spentToday ?? account.spent) : 'unavailable'],
+      ['this month', account ? formatWon(account.spentMonth) : 'unavailable'],
+    ];
+    showInfo(ctx, 'Usage', rows);
+    return true;
+  }
+
+  if (c === 'credit') {
+    const value = arg.toLowerCase();
+    if (value && !['on', 'off'].includes(value)) {
+      notify(ctx, 'Use /credit, /credit on, or /credit off.', 'warning');
+      return true;
+    }
+    if (value) {
+      ctx.showBalance = value === 'on';
+      if (ctx.showBalance) await ctx.refreshUsage(false);
+      notify(ctx, `Header credit ${ctx.showBalance ? 'shown' : 'hidden'}.`, 'success');
+      return true;
+    }
+    const account = await ctx.refreshUsage(false);
+    if (account) notify(ctx, `credit  ${formatWon(account.balance ?? account.credits)}`, 'success');
+    else notify(ctx, 'Unable to load account credit.', 'error');
+    return true;
+  }
+
+  if (c === 'credits' || c === 'balance') {
+    const account = await ctx.refreshUsage(false);
+    if (account) showInfo(ctx, 'Credits', accountUsageRows(account));
+    else notify(ctx, 'Unable to load account credits.', 'error');
+    return true;
+  }
+
+  if (c === 'context') {
+    showInfo(ctx, 'Context', [
+      ['estimate', contextUsageLabel(currentContextTokens(ctx.session), ctx.contextWindow)],
+      ['compactions', ctx.session.compactions?.length || 0],
+      ['auto compact', ctx.autoCompact ? 'on' : 'off'],
+    ]);
+    return true;
+  }
+
+  if (c === 'rename' || c === 'title') {
+    if (!arg) notify(ctx, 'Usage: /rename <session title>', 'warning');
+    else ctx.rename(arg);
+    return true;
+  }
+
+  if (c === 'export') {
+    try {
+      const destination = ctx.exportSession(arg);
+      notify(ctx, `Exported session to ${destination}`, 'success');
+    } catch (error) {
+      notify(ctx, `Export failed: ${error.message}`, 'error');
+    }
     return true;
   }
 
@@ -406,6 +639,11 @@ async function handleSlash(line, ctx) {
       ['workspace', ctx.cwd],
       ['base URL', resolveBaseUrl(loadConfig(), loadAuth())],
       ['messages', ctx.session.messages?.length || 0],
+      ['context', contextUsageLabel(currentContextTokens(ctx.session), ctx.contextWindow)],
+      ['compactions', ctx.session.compactions?.length || 0],
+      ['session billed', formatWon(ctx.session.usage?.credits)],
+      ['account balance', ctx.accountUsage ? formatWon(ctx.accountUsage.balance ?? ctx.accountUsage.credits) : 'not loaded'],
+      ['auto compact', ctx.autoCompact ? 'on' : 'off'],
     ]);
     return true;
   }
@@ -516,6 +754,9 @@ async function handleSlash(line, ctx) {
       ['permission', config.permissionMode],
       ['effort', config.reasoningEffort],
       ['thinking', config.showThinking ? 'visible' : 'hidden'],
+      ['header credit', config.showBalance ? 'visible' : 'hidden'],
+      ['auto compact', config.autoCompact === false ? 'off' : 'on'],
+      ['compact threshold', config.compactThreshold],
       ['max turns', config.maxTurns],
       ['base URL', config.baseUrl],
     ]);
@@ -532,12 +773,19 @@ function printHelp() {
   ${t.dim('─'.repeat(42))}
   /help                 this help
   /status               session + auth info
+  /usage                session tokens + account spend
+  /credit [on|off]      show balance once or toggle header
+  /credits              remaining account credits
+  /compact              summarize old context and continue
+  /context              context estimate and compaction info
   /sessions             list and resume sessions
   /model [id]           list or switch model
   /effort [level]       reasoning: low|medium|high|xhigh|off
   /thinking             toggle reasoning display
   /details              toggle tool execution details
   /goal [on|off]        plan goals without writes or shell
+  /rename <title>       rename the current session
+  /export [path]        export the transcript as Markdown
   /yolo                 toggle auto-approve tools
   /ask                  require tool approval
   /accept-edits         auto file edits
@@ -553,12 +801,19 @@ function showHelp(ctx) {
   const rows = [
     ['/help', 'show commands'],
     ['/status', 'session and runtime info'],
+    ['/usage', 'session tokens and account spend'],
+    ['/credit', 'show balance once or toggle header'],
+    ['/credits', 'refresh account balance and key usage'],
+    ['/compact', 'summarize old context and continue'],
+    ['/context', 'show context estimate and compactions'],
     ['/sessions', 'resume a saved session'],
     ['/model', 'search and switch model'],
     ['/effort', 'set reasoning intensity'],
     ['/thinking', 'toggle reasoning display'],
     ['/details', 'toggle tool details'],
     ['/goal', 'plan goals without writes'],
+    ['/rename', 'rename the current session'],
+    ['/export', 'write a Markdown transcript'],
     ['/ask', 'ask before writes'],
     ['/accept-edits', 'allow file edits'],
     ['/yolo', 'allow all tools'],
@@ -604,7 +859,21 @@ function restoreCookedTty() {
 }
 
 function createChatUi({ model, mode, effort, goalMode, cwd, user, sessionId, print }) {
-  const state = { model, mode, effort, goalMode, cwd, user, sessionId, print, showToolDetails: false };
+  const state = {
+    model,
+    mode,
+    effort,
+    goalMode,
+    cwd,
+    user,
+    sessionId,
+    print,
+    showToolDetails: false,
+    sessionUsage: {},
+    contextWindow: null,
+    accountUsage: null,
+    busy: false,
+  };
   let assistantLineStart = true;
   let reasoningLineStart = true;
   let assistantCells = 0;
@@ -696,11 +965,16 @@ function createChatUi({ model, mode, effort, goalMode, cwd, user, sessionId, pri
     process.stdout.write(t.accent(`\n  ${icons.arrow} `));
   }
 
-  function writeUsage(usage) {
+  function writeUsage(usage, sessionUsage, contextWindow, contextTokens) {
     if (!usage) return;
+    if (sessionUsage) state.sessionUsage = sessionUsage;
+    if (contextWindow != null) state.contextWindow = Number(contextWindow) || null;
+    if (contextTokens != null) state.contextTokens = Number(contextTokens) || 0;
+    const costValue = usage.cost_credits ?? usage.cost_krw;
+    const cost = Number(costValue) > 0 ? `  · ${formatWon(costValue)}` : '';
     console.log(
       t.dim(
-        `  · ${state.model}  ·  ${usage.prompt_tokens || 0} in / ${usage.completion_tokens || 0} out`,
+        `  · ${state.model}  ·  ${formatTokens(usage.prompt_tokens || 0)} in / ${formatTokens(usage.completion_tokens || 0)} out${cost}`,
       ),
     );
   }
@@ -773,8 +1047,25 @@ function createChatUi({ model, mode, effort, goalMode, cwd, user, sessionId, pri
     set sessionId(v) {
       state.sessionId = v;
     },
+    set sessionTitle(v) {
+      state.sessionTitle = v || '';
+    },
     setToolDetails(v) {
       state.showToolDetails = v;
+    },
+    setBusy(v) {
+      state.busy = !!v;
+    },
+    setSessionUsage(v, contextWindow, contextTokens) {
+      state.sessionUsage = v || {};
+      if (contextWindow != null) state.contextWindow = Number(contextWindow) || null;
+      if (contextTokens != null) state.contextTokens = Number(contextTokens) || 0;
+    },
+    setContextWindow(v) {
+      state.contextWindow = Number(v) || null;
+    },
+    setAccountUsage(v) {
+      state.accountUsage = v || null;
     },
     mount,
     writeContext,
@@ -788,4 +1079,11 @@ function createChatUi({ model, mode, effort, goalMode, cwd, user, sessionId, pri
 function formatSessionDate(value) {
   if (!value) return 'unknown time';
   return new Date(value).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+}
+
+function currentContextTokens(session) {
+  return Math.max(
+    Number(session?.lastContextTokens) || 0,
+    estimateMessagesTokens(session?.messages || []),
+  );
 }

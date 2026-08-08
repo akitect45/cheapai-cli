@@ -128,6 +128,27 @@ export async function listModels(client) {
   return res.data || [];
 }
 
+export async function modelInfo(client, model) {
+  const models = await listModels(client);
+  return models.find((item) => item.id === model) || null;
+}
+
+export async function fetchAccountUsage({ baseURL, apiKey } = {}) {
+  const base = String(baseURL || resolveBaseUrl(loadConfig(), loadAuth())).replace(/\/$/, '');
+  const key = apiKey || resolveApiKey();
+  if (!key) throw new Error('API key required to check usage.');
+  const res = await fetch(`${base}/usage`, {
+    headers: {
+      Accept: 'application/json',
+      Authorization: `Bearer ${key}`,
+      'User-Agent': 'CheapAI-CLI/0.3',
+    },
+  });
+  const body = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(body?.error?.message || body?.error || `usage request failed (${res.status})`);
+  return body;
+}
+
 export function persistModel(model) {
   const cfg = loadConfig();
   cfg.model = model;
