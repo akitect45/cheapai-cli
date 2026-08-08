@@ -170,6 +170,8 @@ cheapai whoami
 출력합니다. 실제 credential은 `~/.cheapai/auth.json`에 저장되며, TUI에는 API
 키 일부도 표시하지 않습니다. 자동화 환경에서는 `CHEAPAI_API_KEY` 또는
 `CHEAPSUB_API_KEY`를 사용할 수 있습니다.
+일반 `OPENAI_API_KEY`는 CheapAI 로그인으로 간주하지 않으므로, CheapAI 키는
+두 환경변수 중 하나를 사용해야 합니다.
 
 ## 개발 구조
 

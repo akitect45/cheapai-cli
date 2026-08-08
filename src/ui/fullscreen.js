@@ -47,7 +47,6 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
 
   const PASTE_START = '\x1b[200~';
   const PASTE_END = '\x1b[201~';
-  const KEY_SEQUENCES = ['\x1b[5~', '\x1b[6~', '\x1b[3~', '\x1b[H', '\x1b[F', '\x1b[A', '\x1b[B', '\x1b[C', '\x1b[D'];
 
   function cleanupTerminal() {
     process.stdout.write('\x1b[?2004l\x1b[?25h\x1b[?1049l');
@@ -171,13 +170,13 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
         continue;
       }
 
-      const sequence = KEY_SEQUENCES.find((candidate) => inputBuffer.startsWith(candidate));
+      const sequence = readEscapeSequence(inputBuffer);
       if (sequence) {
         inputBuffer = inputBuffer.slice(sequence.length);
         handleKey(sequence);
         continue;
       }
-      if (inputBuffer.startsWith('\x1b') && KEY_SEQUENCES.some((candidate) => candidate.startsWith(inputBuffer))) {
+      if (isPartialEscapeSequence(inputBuffer)) {
         scheduleEscapeFlush();
         return;
       }
@@ -196,6 +195,10 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
     clearTimeout(escapeTimer);
     escapeTimer = setTimeout(() => {
       if (!inputBuffer.startsWith('\x1b')) return;
+      if (inputBuffer !== '\x1b') {
+        inputBuffer = '';
+        return;
+      }
       inputBuffer = inputBuffer.slice(1);
       handleKey('\x1b');
       processInputBuffer();
@@ -204,6 +207,7 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
   }
 
   function handleKey(key) {
+    key = normalizeKey(key);
     if (state.overlay) {
       handleOverlayKey(key);
       return;
@@ -750,6 +754,31 @@ export function createFullscreenChatUi({ model, mode, effort, cwd, user, session
 function safeWrap(value, width) {
   const text = stripAnsi(String(value || '')).replace(/\r/g, '').replace(/[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]/g, ' ');
   return wrapAnsi(text, Math.max(1, width));
+}
+
+function readEscapeSequence(value) {
+  if (!value.startsWith('\x1b') || value.length < 2) return null;
+  if (value.startsWith('\x1b[')) return value.match(/^\x1b\[[0-?]*[ -/]*[@-~]/)?.[0] || null;
+  if (value.startsWith('\x1bO')) return value.match(/^\x1bO[ -~]/)?.[0] || null;
+  return '\x1b';
+}
+
+function isPartialEscapeSequence(value) {
+  return value === '\x1b' || value.startsWith('\x1b[') || value.startsWith('\x1bO');
+}
+
+function normalizeKey(key) {
+  if (key === '\x1bOA') return '\x1b[A';
+  if (key === '\x1bOB') return '\x1b[B';
+  if (key === '\x1bOC') return '\x1b[C';
+  if (key === '\x1bOD') return '\x1b[D';
+  if (key === '\x1bOH') return '\x1b[H';
+  if (key === '\x1bOF') return '\x1b[F';
+  const match = key.match(/^\x1b\[(\d+)(?:;[^~]*)?~$/);
+  if (!match) return key;
+  if (match[1] === '1' || match[1] === '7') return '\x1b[H';
+  if (match[1] === '4' || match[1] === '8') return '\x1b[F';
+  return key;
 }
 
 function joinSides(left, right, width) {

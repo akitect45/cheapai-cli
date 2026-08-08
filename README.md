@@ -9,11 +9,24 @@ API: `https://api.cheapai.im/v1`
 
 ## 설치
 
+macOS / Linux:
+
+```bash
+cd /path/to/cheapai-cli
+npm install
+npm link
+```
+
+Windows PowerShell:
+
 ```powershell
 cd C:\projects\cheapai-cli
 npm install
 npm link
 ```
+
+Node.js `>=20`와 ANSI/raw keyboard input을 지원하는 터미널이 필요합니다.
+macOS 기본 Terminal/iTerm2, Windows Terminal/PowerShell에서 사용할 수 있습니다.
 
 ## 시작 흐름
 
@@ -118,8 +131,7 @@ cheapai models
 
 기본 설정 디렉터리는 `~/.cheapai`입니다. 테스트나 격리된 실행에서는
 `CHEAPAI_HOME`으로 저장 위치를 변경할 수 있습니다. API 키는
-`CHEAPAI_API_KEY`, `CHEAPSUB_API_KEY`, `OPENAI_API_KEY` 순서로 환경변수도
-확인합니다.
+`CHEAPAI_API_KEY`, `CHEAPSUB_API_KEY` 순서로 환경변수도 확인합니다.
 
 ## 개발
 

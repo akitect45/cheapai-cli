@@ -1,5 +1,10 @@
 import { t } from './theme.js';
 
+const graphemeSegmenter = typeof Intl.Segmenter === 'function'
+  ? new Intl.Segmenter(undefined, { granularity: 'grapheme' })
+  : null;
+const extendedPictographic = /\p{Extended_Pictographic}/u;
+
 export function termWidth() {
   return Math.max(20, Math.min(process.stdout.columns || 80, 110));
 }
@@ -57,6 +62,11 @@ export function stripAnsi(s) {
 
 export function displayWidth(value) {
   const text = stripAnsi(value).replace(/\r/g, '');
+  if (graphemeSegmenter) {
+    let width = 0;
+    for (const { segment } of graphemeSegmenter.segment(text)) width += graphemeWidth(segment);
+    return width;
+  }
   let width = 0;
   for (const char of text) {
     const code = char.codePointAt(0);
@@ -64,6 +74,29 @@ export function displayWidth(value) {
     width += isWideCodePoint(code) ? 2 : 1;
   }
   return width;
+}
+
+function graphemeWidth(segment) {
+  const codePoints = [...segment].filter((char) => {
+    const code = char.codePointAt(0);
+    return code !== 0x200d && code !== 0xfe0e && code !== 0xfe0f && !(code >= 0x1f3fb && code <= 0x1f3ff);
+  });
+  if (!codePoints.length) return 0;
+  if (segment.includes('\u200d') && extendedPictographic.test(segment) || codePoints.length > 1 && codePoints.every((char) => {
+    const code = char.codePointAt(0);
+    return code >= 0x1f1e6 && code <= 0x1f1ff;
+  }) || segment.includes('\ufe0f')) return 2;
+  if (segment.includes('\u200d')) {
+    return codePoints.reduce((width, char) => {
+      const code = char.codePointAt(0);
+      if (code >= 0x300 && code <= 0x36f) return width;
+      return width + (isWideCodePoint(code) ? 2 : 1);
+    }, 0);
+  }
+  const code = codePoints[0].codePointAt(0);
+  if (isWideCodePoint(code)) return 2;
+  if (code >= 0x300 && code <= 0x36f) return 0;
+  return 1;
 }
 
 export function sanitizeTerminalText(value) {
@@ -85,17 +118,32 @@ export function wrapAnsi(value, width) {
     let cells = 0;
     let active = '';
     const tokens = source.match(/\x1b\[[0-?]*[ -/]*[@-~]|[\s\S]/g) || [];
-    for (const token of tokens) {
+    for (let index = 0; index < tokens.length; index++) {
+      const token = tokens[index];
       const isAnsi = token.startsWith('\x1b[');
-      if (isAnsi) active = token === t.reset ? '' : active + token;
-      const next = isAnsi ? 0 : displayWidth(token);
-      if (cells && cells + next > max) {
-        lines.push(active ? line + t.reset : line);
-        line = active;
-        cells = 0;
+      if (isAnsi) {
+        active = token === t.reset ? '' : active + token;
+        line += token;
+        continue;
       }
-      line += token;
-      cells += next;
+
+      let plain = token;
+      while (index + 1 < tokens.length && !tokens[index + 1].startsWith('\x1b[')) {
+        plain += tokens[++index];
+      }
+      const segments = graphemeSegmenter
+        ? [...graphemeSegmenter.segment(plain)].map(({ segment }) => segment)
+        : [...plain];
+      for (const segment of segments) {
+        const next = displayWidth(segment);
+        if (cells && cells + next > max) {
+          lines.push(active ? line + t.reset : line);
+          line = active;
+          cells = 0;
+        }
+        line += segment;
+        cells += next;
+      }
     }
     lines.push(line);
   }

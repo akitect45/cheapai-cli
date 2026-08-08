@@ -5,6 +5,7 @@ import {
   pollDeviceAuth,
   openBrowser,
   loginWithApiKey,
+  redactAuthSecrets,
 } from '../auth.js';
 import { loadConfig, DEFAULT_WEB_ORIGIN } from '../config.js';
 import { readSecret } from './input.js';
@@ -98,7 +99,7 @@ export async function runBrowserAuthFlow({ webOrigin } = {}) {
         if (debug || status !== 'pending') {
           process.stdout.write('\n');
           console.log(t.dim(`  status → ${status}`));
-          if (debug) console.log(t.dim('  raw: ' + JSON.stringify(poll.raw || poll).slice(0, 400)));
+           if (debug) console.log(t.dim('  raw: ' + JSON.stringify(redactAuthSecrets(poll.raw || poll)).slice(0, 400)));
         }
       }
 
@@ -134,8 +135,8 @@ export async function runBrowserAuthFlow({ webOrigin } = {}) {
         process.stdout.write('\n\n');
         const key = poll.api_key;
         if (!key) {
-          console.log(t.red('  승인 상태이지만 api_key 가 없습니다.'));
-          console.log(t.dim('  서버 poll 응답: ' + JSON.stringify(poll.raw || {}).slice(0, 500)));
+           console.log(t.red('  승인 상태이지만 api_key 가 없습니다.'));
+           console.log(t.dim('  서버 poll 응답: ' + JSON.stringify(redactAuthSecrets(poll.raw || {})).slice(0, 500)));
           return fallbackWithPaste(origin);
         }
         try {
@@ -162,7 +163,7 @@ export async function runBrowserAuthFlow({ webOrigin } = {}) {
         unknownLogged = true;
         process.stdout.write('\n');
         console.log(t.yellow(`  알 수 없는 status="${status}" — 계속 대기합니다.`));
-        console.log(t.dim('  ' + JSON.stringify(poll.raw || poll).slice(0, 400)));
+         console.log(t.dim('  ' + JSON.stringify(redactAuthSecrets(poll.raw || poll)).slice(0, 400)));
         console.log(t.dim('  서버 poll 이 { status:"approved", api_key:"csk_..." } 를 줘야 합니다.'));
       }
       await sleep(intervalSec * 1000);

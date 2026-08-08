@@ -55,7 +55,7 @@ export function loadSession(id) {
 export function findLatestSession(cwd) {
   const dir = sessionsDir();
   if (!fs.existsSync(dir)) return null;
-  const target = path.resolve(cwd);
+  const target = comparableWorkspace(cwd);
   const files = fs
     .readdirSync(dir)
     .filter((f) => f.endsWith('.json') && f !== 'index.jsonl')
@@ -69,7 +69,7 @@ export function findLatestSession(cwd) {
       }
     })
     .filter(Boolean)
-    .filter((x) => path.resolve(x.data.cwd || '') === target)
+    .filter((x) => comparableWorkspace(x.data.cwd || '') === target)
     .sort((a, b) => b.mtime - a.mtime);
   return files[0]?.data || null;
 }
@@ -77,7 +77,7 @@ export function findLatestSession(cwd) {
 export function listSessions(cwd) {
   const dir = sessionsDir();
   if (!fs.existsSync(dir)) return [];
-  const target = path.resolve(cwd);
+  const target = comparableWorkspace(cwd);
   return fs
     .readdirSync(dir)
     .filter((file) => file.endsWith('.json') && file !== 'index.jsonl')
@@ -88,7 +88,7 @@ export function listSessions(cwd) {
         return null;
       }
     })
-    .filter((session) => session && path.resolve(session.cwd || '') === target)
+    .filter((session) => session && comparableWorkspace(session.cwd || '') === target)
     .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
 }
 
@@ -102,4 +102,10 @@ export function createSession({ cwd, model, systemPrompt }) {
     title: '',
     messages: [{ role: 'system', content: systemPrompt }],
   };
+}
+
+export function comparableWorkspace(cwd, platform = process.platform) {
+  const pathApi = platform === 'win32' ? path.win32 : path;
+  const resolved = pathApi.normalize(pathApi.resolve(cwd));
+  return platform === 'win32' ? resolved.toLowerCase() : resolved;
 }

@@ -1,4 +1,5 @@
 import readline from 'node:readline/promises';
+import path from 'node:path';
 import { stdin as input, stdout as output } from 'node:process';
 import { t, icons, VERSION } from './theme.js';
 import {
@@ -49,10 +50,18 @@ export async function startChatTui({
   print = false,
 } = {}) {
   const cfg = loadConfig();
-  const cwd = opts.cwd || process.cwd();
+  const requestedCwd = path.resolve(opts.cwd || process.cwd());
+  let session;
+  if (opts.resume) {
+    session = loadSession(opts.resume);
+    if (!session) throw new Error(`세션 없음: ${opts.resume}`);
+  } else if (opts.continue) {
+    session = findLatestSession(requestedCwd);
+  }
+  const cwd = path.resolve(session?.cwd || requestedCwd);
   process.chdir(cwd);
 
-  let model = resolveModel(opts.model, cfg);
+  let model = session?.model && !opts.model ? session.model : resolveModel(opts.model, cfg);
   let reasoningEffort = opts.effort || cfg.reasoningEffort || 'off';
   let permissionMode = opts.yolo
     ? 'yolo'
@@ -64,13 +73,6 @@ export async function startChatTui({
 
   let { client } = createClient({ model });
 
-  let session;
-  if (opts.resume) {
-    session = loadSession(opts.resume);
-    if (!session) throw new Error(`세션 없음: ${opts.resume}`);
-  } else if (opts.continue) {
-    session = findLatestSession(cwd);
-  }
   if (!session) {
     session = createSession({
       cwd,
@@ -79,7 +81,11 @@ export async function startChatTui({
     });
     saveSession(session);
   } else {
+    session.cwd = cwd;
     session.model = model;
+    if (opts.model && session.messages?.[0]?.role === 'system') {
+      session.messages[0].content = buildSystemPrompt({ cwd, model });
+    }
   }
 
   const fullscreen = !print && input.isTTY && output.isTTY;
@@ -327,7 +333,7 @@ async function handleSlash(line, ctx) {
   }
 
   if (c === 'sessions' || c === 'resume') {
-    const sessions = listSessions(ctx.cwd).slice(0, 12);
+    const sessions = listSessions(ctx.cwd);
     if (!sessions.length) {
       notify(ctx, 'No saved sessions for this workspace.');
       return true;
@@ -343,6 +349,7 @@ async function handleSlash(line, ctx) {
       options,
       initialIndex: Math.max(0, sessions.findIndex((item) => item.id === ctx.session.id)),
       footer: '↑/↓ move  Enter resume  Esc cancel',
+      searchable: true,
     });
     if (picked) ctx.resumeSession(picked.action ?? picked);
     return true;
@@ -443,8 +450,12 @@ async function handleSlash(line, ctx) {
   }
 
   if (c === 'logout') {
-    logout();
-    notify(ctx, 'Logged out.', 'warning');
+    const result = logout();
+    notify(
+      ctx,
+      result.loggedOut ? 'Logged out.' : `auth.json cleared; ${result.source} is still active.`,
+      'warning',
+    );
     return 'exit';
   }
 
@@ -511,8 +522,10 @@ function showHelp(ctx) {
     ['/ask', 'ask before writes'],
     ['/accept-edits', 'allow file edits'],
     ['/yolo', 'allow all tools'],
-    ['/new', 'start a new session'],
+    ['/new /clear', 'start a new session'],
     ['/dashboard', 'open web dashboard'],
+    ['/config', 'show local configuration'],
+    ['/logout', 'clear credentials and quit'],
     ['/exit', 'quit'],
   ];
   if (ctx.ui.showInfo) ctx.ui.showInfo('Commands', rows);

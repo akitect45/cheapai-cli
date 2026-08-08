@@ -7,8 +7,9 @@ const READ_TOOLS = new Set(['read_file', 'glob', 'grep']);
 /**
  * @param {'ask'|'auto'|'accept-edits'|'yolo'} mode
  */
-export function createPermissionGate(mode = 'ask', requestApproval = null) {
+export function createPermissionGate(mode = 'ask', requestApproval = null, { interactive } = {}) {
   const m = mode || 'ask';
+  const canPrompt = interactive ?? (process.stdin.isTTY && process.stdout.isTTY);
 
   return {
     mode: m,
@@ -32,13 +33,13 @@ export function createPermissionGate(mode = 'ask', requestApproval = null) {
         // unknown tools: ask unless yolo
         if (m === 'yolo') return true;
       }
-      return requestApproval ? requestApproval(toolName, detail) : askUser(toolName, detail);
+      return requestApproval ? requestApproval(toolName, detail) : askUser(toolName, detail, canPrompt);
     },
   };
 }
 
-async function askUser(toolName, detail) {
-  if (!process.stdin.isTTY) {
+async function askUser(toolName, detail, interactive) {
+  if (!interactive) {
     // non-interactive: deny writes unless yolo was set (handled above)
     console.error(`[permission] denied (non-TTY): ${toolName}`);
     return false;

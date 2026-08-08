@@ -133,9 +133,10 @@ export async function selectMenu({
 
       while (buf.length) {
         if (buf.startsWith('\x1b[')) {
-          if (buf.length < 3) return;
-          const code = buf[2];
-          buf = buf.slice(3);
+          const sequence = readCsiSequence(buf);
+          if (!sequence) return;
+          const code = sequence.at(-1);
+          buf = buf.slice(sequence.length);
           const filtered = visibleOptions();
           if (code === 'A') {
             if (filtered.length) index = (index - 1 + filtered.length) % filtered.length;
@@ -273,4 +274,8 @@ function centerBlock(lines) {
   const blockWidth = Math.min(termWidth(), Math.max(...lines.map(displayWidth), 1));
   const left = Math.max(0, Math.floor((screenWidth - blockWidth) / 2));
   return lines.map((line) => `${' '.repeat(left)}${line}`);
+}
+
+function readCsiSequence(value) {
+  return value.match(/^\x1b\[[0-?]*[ -/]*[@-~]/)?.[0] || null;
 }

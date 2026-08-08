@@ -37,9 +37,15 @@ console.log('cheapai e2e\n');
 
 // 2) tools runtime
 {
-  const { createToolRuntime, TOOL_DEFINITIONS } = await import('../src/agent/tools.js');
+  const { createToolRuntime, TOOL_DEFINITIONS, shellInvocation } = await import('../src/agent/tools.js');
   if (TOOL_DEFINITIONS.length < 6) bad('tool defs', new Error('count ' + TOOL_DEFINITIONS.length));
   else ok(`tool definitions (${TOOL_DEFINITIONS.length})`);
+
+  const windowsShell = shellInvocation('dir', 'win32', { ComSpec: 'C:\\Windows\\System32\\cmd.exe' });
+  const macShell = shellInvocation('pwd', 'darwin', { SHELL: '/bin/zsh' });
+  if (windowsShell[0] !== 'C:\\Windows\\System32\\cmd.exe' || windowsShell[1][0] !== '/c' || macShell[0] !== 'bash' || macShell[1][0] !== '-lc') {
+    bad('platform shell selection', new Error(JSON.stringify({ windowsShell, macShell })));
+  } else ok('platform shell selection');
 
   const tmp = path.join(os.tmpdir(), `cheapai-e2e-${Date.now()}`);
   fs.mkdirSync(tmp, { recursive: true });
@@ -89,7 +95,7 @@ console.log('cheapai e2e\n');
 
 // 3) poll normalizer
 {
-  const { normalizePollResult } = await import('../src/auth.js');
+  const { browserInvocation, normalizePollResult, openBrowser, pollDeviceAuth, redactAuthSecrets } = await import('../src/auth.js');
   const cases = [
     [{ status: 'pending' }, 'pending', null],
     [{ status: 'approved', api_key: 'csk_abc' }, 'approved', 'csk_abc'],
@@ -103,6 +109,63 @@ console.log('cheapai e2e\n');
     if (n.status !== st || (key && n.api_key !== key)) {
       bad('normalize ' + JSON.stringify(body), new Error(JSON.stringify(n)));
     } else ok(`normalize ${st}${key ? ' +key' : ''}`);
+  }
+  if (normalizePollResult({}, 401).status !== 'error' || normalizePollResult({}, 500).status !== 'error' || normalizePollResult({}, 403).status !== 'pending') {
+    bad('normalize HTTP statuses', new Error('unexpected HTTP status normalization'));
+  } else ok('normalize HTTP statuses');
+
+  const savedFetch = globalThis.fetch;
+  try {
+    globalThis.fetch = async () => new Response(JSON.stringify({ status: 'pending' }), { status: 403 });
+    const pending = await pollDeviceAuth({ webOrigin: 'https://example.invalid', deviceCode: 'test-device' });
+    if (pending.status !== 'pending') bad('poll recognized HTTP state', new Error(JSON.stringify(pending)));
+    else ok('poll recognized HTTP state');
+
+    globalThis.fetch = async () => new Response('', { status: 500 });
+    let rejected = false;
+    try {
+      await pollDeviceAuth({ webOrigin: 'https://example.invalid', deviceCode: 'test-device' });
+    } catch {
+      rejected = true;
+    }
+    if (!rejected) bad('poll HTTP failure', new Error('500 was accepted as pending'));
+    else ok('poll HTTP failure');
+  } finally {
+    globalThis.fetch = savedFetch;
+  }
+
+  const safe = JSON.stringify(redactAuthSecrets({
+    key: 'key_secret',
+    api_key: 'csk_secret',
+    accessToken: 'token_secret',
+    nested: { deviceCode: 'device_secret' },
+    status: 'approved',
+  }));
+  if (safe.includes('secret')) bad('credential redaction', new Error(safe));
+  else ok('credential redaction');
+
+  const macBrowser = browserInvocation('https://cheapai.im', 'darwin');
+  const windowsBrowser = browserInvocation('https://cheapai.im', 'win32');
+  if (macBrowser[0] !== 'open' || windowsBrowser[0] !== 'explorer.exe' || openBrowser('javascript:alert(1)') !== false) {
+    bad('platform browser selection', new Error(JSON.stringify({ macBrowser, windowsBrowser })));
+  } else ok('platform browser selection');
+}
+
+// 3b) authentication source safety
+{
+  const { resolveApiKey } = await import('../src/config.js');
+  const envNames = ['CHEAPAI_API_KEY', 'CHEAPSUB_API_KEY', 'OPENAI_API_KEY'];
+  const saved = Object.fromEntries(envNames.map((name) => [name, process.env[name]]));
+  try {
+    envNames.forEach((name) => delete process.env[name]);
+    process.env.OPENAI_API_KEY = 'openai-only-must-not-login-cheapai';
+    if (resolveApiKey(null)) bad('CheapAI auth source', new Error('OPENAI_API_KEY was accepted'));
+    else ok('OPENAI_API_KEY does not bypass auth welcome');
+  } finally {
+    for (const name of envNames) {
+      if (saved[name] === undefined) delete process.env[name];
+      else process.env[name] = saved[name];
+    }
   }
 }
 
@@ -119,6 +182,10 @@ console.log('cheapai e2e\n');
 
   if (displayWidth('😀') !== 2) bad('terminal emoji width', new Error('unexpected width'));
   else ok('terminal emoji width');
+
+  if (displayWidth('🇰🇷') !== 2 || displayWidth('👨‍👩‍👧‍👦') !== 2 || displayWidth('a\u200db') !== 2) {
+    bad('terminal grapheme width', new Error('flag, ZWJ emoji, or text was over-counted'));
+  } else ok('terminal grapheme width');
 
   const spaced = wrapAnsi('abcd ef', 4);
   if (spaced.join('') !== 'abcd ef' || spaced.some((line) => displayWidth(line) > 4)) {
@@ -176,6 +243,19 @@ console.log('cheapai e2e\n');
   if (edits.requiresApproval('edit_file') || !edits.requiresApproval('bash')) {
     bad('permission edit policy', new Error('unexpected approval policy'));
   } else ok('permission edit policy');
+
+  const printGate = createPermissionGate('ask', null, { interactive: false });
+  if (await printGate.approve('bash', 'echo should-not-prompt')) {
+    bad('non-interactive permission', new Error('write prompt was allowed'));
+  } else ok('non-interactive permission denial');
+}
+
+// 6b) Windows workspace matching
+{
+  const { comparableWorkspace } = await import('../src/agent/session.js');
+  if (comparableWorkspace('C:/Users/Dev/Project', 'win32') !== comparableWorkspace('c:\\users\\dev\\project', 'win32')) {
+    bad('Windows workspace matching', new Error('path casing differs'));
+  } else ok('Windows workspace matching');
 }
 
 // 7) full-screen TUI frame
@@ -213,12 +293,12 @@ console.log('cheapai e2e\n');
 // 8) device endpoints shape
 if (process.argv.includes('--poll-shape') || process.argv.includes('--live')) {
   try {
-    const { startDeviceAuth, pollDeviceAuth } = await import('../src/auth.js');
+    const { startDeviceAuth, pollDeviceAuth, redactAuthSecrets } = await import('../src/auth.js');
     const d = await startDeviceAuth();
     ok(`device/code user_code=${d.user_code}`);
     const p = await pollDeviceAuth({ deviceCode: d.device_code });
     ok(`device/poll status=${p.status}`);
-    console.log('  raw poll:', JSON.stringify(p.raw || p).slice(0, 300));
+    console.log('  raw poll:', JSON.stringify(redactAuthSecrets(p.raw || p)).slice(0, 300));
   } catch (e) {
     bad('device endpoints', e);
   }

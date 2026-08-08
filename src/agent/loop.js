@@ -36,7 +36,9 @@ export async function runAgentLoop({
       }
     },
   });
-  let gate = createPermissionGate(alwaysApprove ? 'yolo' : permissionMode, requestPermission);
+  let gate = createPermissionGate(alwaysApprove ? 'yolo' : permissionMode, requestPermission, {
+    interactive: !print && process.stdin.isTTY && process.stdout.isTTY,
+  });
 
   session.messages.push({ role: 'user', content: userText });
   if (!session.title) session.title = sessionTitle(userText);
@@ -109,7 +111,9 @@ export async function runAgentLoop({
           const decision = await gate.approve(name, detail);
           if (decision === 'always') {
             alwaysApprove = true;
-            gate = createPermissionGate('yolo', requestPermission);
+            gate = createPermissionGate('yolo', requestPermission, {
+              interactive: !print && process.stdin.isTTY && process.stdout.isTTY,
+            });
             onPermissionModeChange?.('yolo');
             allowed = true;
           } else {

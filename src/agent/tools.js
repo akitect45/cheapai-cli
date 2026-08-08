@@ -150,8 +150,8 @@ export function createToolRuntime({ cwd, onTodo } = {}) {
 
   async function runBash(command, timeout_ms = 120_000) {
     return new Promise((resolve) => {
-      const isWin = process.platform === 'win32';
-      const child = spawn(isWin ? 'cmd.exe' : 'bash', isWin ? ['/c', command] : ['-lc', command], {
+      const [shell, args] = shellInvocation(command);
+      const child = spawn(shell, args, {
         cwd: root,
         env: process.env,
         windowsHide: true,
@@ -372,6 +372,11 @@ export function createToolRuntime({ cwd, onTodo } = {}) {
   }
 
   return { execute, detailFor, root, getTodos: () => todos };
+}
+
+export function shellInvocation(command, platform = process.platform, env = process.env) {
+  if (platform === 'win32') return [env.ComSpec || 'cmd.exe', ['/c', command]];
+  return ['bash', ['-lc', command]];
 }
 
 // silence unused import warning in some bundlers

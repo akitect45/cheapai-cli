@@ -53,7 +53,7 @@ export async function main(argv = process.argv) {
           auth = await runBrowserAuthFlow({ webOrigin: opts.webOrigin });
         }
         console.log(t.green(`✓ signed in as ${auth.username || 'api-key'}`));
-        if (!opts.noChat && process.stdin.isTTY) {
+        if (!opts.noChat && process.stdin.isTTY && process.stdout.isTTY) {
           await enterChat({ prompt: '', opts: {} });
         }
       } catch (err) {
@@ -63,8 +63,9 @@ export async function main(argv = process.argv) {
     });
 
   program.command('logout').action(() => {
-    logout();
-    console.log('✓ logged out');
+    const result = logout();
+    if (result.loggedOut) console.log('✓ logged out');
+    else console.log(`auth.json cleared; still signed in via ${result.source}`);
   });
 
   program.command('whoami').action(() => {

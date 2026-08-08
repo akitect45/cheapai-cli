@@ -1,6 +1,6 @@
 import readline from 'node:readline/promises';
 import { stdin as input, stdout as output } from 'node:process';
-import { exec } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { readSecret } from './ui/input.js';
 import {
   DEFAULT_BASE_URL,
@@ -41,7 +41,21 @@ function cookieFromSetCookie(headers) {
 }
 
 function logDebug(...args) {
-  if (DEBUG()) console.error('[cheapai:debug]', ...args);
+  if (DEBUG()) console.error('[cheapai:debug]', ...args.map(redactAuthSecrets));
+}
+
+const SECRET_KEY = /^(?:key|api[_-]?key|plain[_-]?key|access[_-]?token|refresh[_-]?token|token|authorization|cookie|password|secret|device[_-]?code)$/i;
+
+/** Redact credentials before diagnostic output or test summaries. */
+export function redactAuthSecrets(value) {
+  if (Array.isArray(value)) return value.map(redactAuthSecrets);
+  if (!value || typeof value !== 'object') return value;
+  return Object.fromEntries(
+    Object.entries(value).map(([key, nested]) => [
+      key,
+      SECRET_KEY.test(key) ? '[redacted]' : redactAuthSecrets(nested),
+    ]),
+  );
 }
 
 // ─── Device code ────────────────────────────────────────────────────────────
@@ -181,8 +195,9 @@ export function normalizePollResult(body, httpStatus) {
   else if (doneAliases.has(status)) status = 'approved';
   else if (status === 'error' && !api_key) status = 'error';
   else if (!status) {
-    if (httpStatus === 428 || httpStatus === 403) status = 'pending';
+    if (httpStatus === 403 || httpStatus === 428) status = 'pending';
     else if (api_key) status = 'approved';
+    else if (httpStatus >= 400) status = 'error';
     else status = 'pending';
   }
 
@@ -229,8 +244,6 @@ export async function pollDeviceAuth({ webOrigin, deviceCode } = {}) {
   ];
 
   let lastErr;
-  let lastNormalized = null;
-
   for (const p of paths) {
     for (const body of bodies) {
       try {
@@ -260,7 +273,16 @@ export async function pollDeviceAuth({ webOrigin, deviceCode } = {}) {
         }
 
         const norm = normalizePollResult(json, res.status);
-        lastNormalized = norm;
+        // OAuth-style pending responses may use 400/428, but other HTTP
+        // failures must not turn into an unbounded pending poll.
+        const expectedNonOk = (
+          [400, 403, 428].includes(res.status) && ['pending', 'slow_down', 'approved', 'denied', 'expired'].includes(norm.status)
+        ) || (
+          res.status === 429 && ['pending', 'slow_down'].includes(norm.status)
+        );
+        if (!res.ok && !expectedNonOk) {
+          throw new Error(norm.error || `device poll failed (${res.status})`);
+        }
 
         // invalid device_code on this body shape — try next body
         if (
@@ -280,7 +302,6 @@ export async function pollDeviceAuth({ webOrigin, deviceCode } = {}) {
     }
   }
 
-  if (lastNormalized) return lastNormalized;
   throw lastErr || new Error('device poll endpoint not available');
 }
 
@@ -292,7 +313,7 @@ export async function loginWithApiKey(apiKey, { baseUrl, username, keyName } = {
   if (!key.startsWith('csk_') && !key.startsWith('sk-')) {
     console.warn('경고: CheapAI 키는 보통 csk_ 로 시작합니다.');
   }
-  const base = (baseUrl || DEFAULT_BASE_URL).replace(/\/$/, '');
+  const base = (baseUrl || resolveBaseUrl(loadConfig(), loadAuth()) || DEFAULT_BASE_URL).replace(/\/$/, '');
 
   // Prefer a lightweight auth check; models list may be public
   let validated = false;
@@ -382,19 +403,36 @@ export async function interactiveLogin(opts = {}) {
 }
 
 export function openBrowser(url) {
-  const platform = process.platform;
-  const safe = url.replace(/"/g, '');
-  const cmd =
-    platform === 'win32'
-      ? `cmd /c start "" "${safe}"`
-      : platform === 'darwin'
-        ? `open "${safe}"`
-        : `xdg-open "${safe}"`;
-  exec(cmd, () => {});
+  const target = String(url || '').trim();
+  try {
+    const parsed = new URL(target);
+    if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('unsupported browser URL');
+  } catch {
+    logDebug('browser launch skipped: invalid URL', target);
+    return false;
+  }
+
+  const command = browserInvocation(target);
+  const child = spawn(command[0], command[1], { detached: true, stdio: 'ignore', windowsHide: true });
+  child.once('error', (error) => logDebug('browser launch error', error.message));
+  child.unref();
+  return true;
+}
+
+export function browserInvocation(target, platform = process.platform) {
+  if (platform === 'win32') return ['explorer.exe', [target]];
+  if (platform === 'darwin') return ['open', [target]];
+  return ['xdg-open', [target]];
 }
 
 export function logout() {
   clearAuth();
+  const source = process.env.CHEAPAI_API_KEY
+    ? 'CHEAPAI_API_KEY'
+    : process.env.CHEAPSUB_API_KEY
+      ? 'CHEAPSUB_API_KEY'
+      : null;
+  return { loggedOut: !source, source };
 }
 
 export function whoami() {
@@ -413,6 +451,6 @@ export function whoami() {
         ? 'env:CHEAPSUB_API_KEY'
         : auth?.apiKey
           ? 'auth.json'
-          : 'env:OPENAI_API_KEY',
+          : 'unknown',
   };
 }

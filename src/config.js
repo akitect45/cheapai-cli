@@ -87,7 +87,6 @@ export function resolveApiKey(auth = loadAuth()) {
   return (
     process.env.CHEAPAI_API_KEY ||
     process.env.CHEAPSUB_API_KEY ||
-    process.env.OPENAI_API_KEY ||
     auth?.apiKey ||
     null
   );
