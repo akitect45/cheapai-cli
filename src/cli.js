@@ -27,8 +27,20 @@ import {
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadCustomAgents } from './agent/commands.js';
+import { checkForUpdate } from './update.js';
 
 export async function main(argv = process.argv) {
+  const args = argv.slice(2);
+  const command = args[0];
+  const skipUpdateCheck = args.includes('--help')
+    || args.includes('-h')
+    || args.includes('--version')
+    || args.includes('-V')
+    || args.includes('--json')
+    || args.includes('--print')
+    || args.includes('-p')
+    || ['login', 'logout', 'whoami', 'models', 'usage', 'stats', 'session', 'agent', 'export', 'import', 'credits', 'config', 'dashboard'].includes(command);
+  const updateInfo = skipUpdateCheck ? null : await checkForUpdate();
   const program = new Command();
   program
     .name('cheapai')
@@ -51,7 +63,7 @@ export async function main(argv = process.argv) {
     .option('--login', 'Force auth picker even if already signed in', false)
     .action(async (promptParts, opts) => {
       const prompt = promptParts.join(' ').trim();
-      await boot({ prompt, opts });
+      await boot({ prompt, opts: { ...opts, updateInfo } });
     });
 
   program
@@ -145,7 +157,7 @@ export async function main(argv = process.argv) {
     .option('--max-turns <n>', 'Max tool loops', (value) => Number(value))
     .option('--no-auto-compact', 'Disable automatic context compaction')
     .action(async (promptParts, opts) => {
-      await boot({ prompt: promptParts.join(' ').trim(), opts });
+      await boot({ prompt: promptParts.join(' ').trim(), opts: { ...opts, updateInfo } });
     });
 
   program

@@ -55,6 +55,7 @@ import {
   sessionUsageRows,
 } from '../agent/usage.js';
 import { redoTurn, undoTurn } from '../agent/history.js';
+import { formatUpdateNotice } from '../update.js';
 
 /**
  * Append-only interactive chat for a focused coding workspace.
@@ -64,7 +65,9 @@ export async function startChatTui({
   prompt = '',
   opts = {},
   print = false,
+  updateInfo = null,
 } = {}) {
+  const startupUpdate = updateInfo || opts.updateInfo || null;
   const cfg = loadConfig();
   const requestedCwd = path.resolve(opts.cwd || process.cwd());
   let session;
@@ -310,6 +313,7 @@ export async function startChatTui({
           ui.setBusy(false);
         }
       }
+      if (startupUpdate) ui.addNotice?.(formatUpdateNotice(startupUpdate), 'warning');
       while (true) {
         const line = (await ui.readInput()).trim();
         if (!line) continue;
@@ -347,6 +351,7 @@ export async function startChatTui({
   if (prompt) {
     await runOnce(prompt);
   }
+  if (startupUpdate) ui.addNotice?.(formatUpdateNotice(startupUpdate), 'warning');
 
   let history = [];
   while (true) {

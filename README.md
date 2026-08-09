@@ -179,6 +179,11 @@ turn을 undo/redo합니다. 실행 중 `Escape` 또는 `Ctrl+C`는 생성과 실
 이하 파일만 추적하며, 이후 사용자가 파일을 바꾼 경우 충돌로 판단해 덮어쓰지
 않습니다. Bash가 만든 변경은 자동으로 되돌리거나 재실행하지 않습니다.
 
+CLI는 하루에 한 번 npm의 `@akitect/cheapai` 최신 버전을 확인합니다. 새 버전이
+있으면 TUI에 업데이트 안내와 함께 `npm i @akitect/cheapai` 명령을 표시합니다.
+네트워크 오류는 실행을 막지 않으며, `CHEAPAI_NO_UPDATE_CHECK=1`로 확인을 끌 수
+있습니다.
+
 ## 개발
 
 ```powershell
