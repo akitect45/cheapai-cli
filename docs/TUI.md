@@ -68,7 +68,7 @@ Fullscreen TUI는 프로세스가 종료되거나 `Ctrl+C`가 입력될 때 raw 
 | `Ctrl+P` / `Ctrl+N` | 이전 프롬프트 / 다음 프롬프트 |
 | `Ctrl+K` | 검색 가능한 command palette |
 | `Ctrl+Z` / `Ctrl+Y` | 마지막 turn undo / redo |
-| `/` + `Up` / `Down` | 명령 제안 선택 |
+| `/` + `Up` / `Down` | 전체 명령 제안을 순환 선택 |
 | `/` + `Tab` | 선택한 명령 자동 완성 |
 | `Ctrl+C` | 실행 중이면 중단, 대기 중이면 CLI 종료 및 터미널 복구 |
 | bracketed paste | 여러 줄 붙여넣기 |
@@ -135,8 +135,7 @@ Agent profile은 `.opencode/agents/*.md`, `.cheapai/agents/*.md`,
 | `/help` | 명령 목록 표시 |
 | `/status` | 인증, 모델, 세션, workspace와 runtime 정보 표시 |
 | `/usage`, `/stats` | 현재 세션 토큰·비용과 계정 사용액 표시 |
-| `/credit [on|off]` | 현재 잔액 한 줄 표시 또는 header 잔액 표시 설정 |
-| `/credits`, `/balance` | 서버에서 계정 잔액·키 사용량 새로고침 |
+| `/credits [on|off]` | 서버에서 계정 잔액·키 사용량 표시 또는 header 잔액 표시 설정 |
 | `/compact` | 이전 대화를 모델 요약으로 축약하고 최신 exchange 유지 |
 | `/undo`, `/revert` | 마지막 turn 제거 및 추적 가능한 파일 변경 복원 |
 | `/redo`, `/unrevert` | 마지막 undo의 대화와 추적 파일 변경 재적용 |
@@ -162,6 +161,11 @@ Agent profile은 `.opencode/agents/*.md`, `.cheapai/agents/*.md`,
 | `/config` | 로컬 설정 요약 표시 |
 | `/logout` | credential 삭제 후 종료 |
 | `/exit`, `/quit`, `/q` | 종료 |
+
+명령 제안은 한 번에 최대 5개를 표시하지만 `Up`/`Down`으로 전체 목록을 이동하며,
+마지막 항목에서 다시 `Down`을 누르면 첫 항목으로 돌아갑니다. `/help`, `/config`,
+`/status`처럼 viewport에 표시되는 안내 출력은 1분 뒤 또는 다음 일반 메시지 전송 시
+자동으로 사라집니다.
 
 ## 세션과 저장 위치
 

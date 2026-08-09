@@ -18,7 +18,7 @@ CheapAI에 필요한 기능을 대조했다.
 | transcript search / copy / retry | `/search`, `/copy`, `/retry` |
 | session export / import | JSON CLI export/import, Markdown `/export` |
 | local stats | `cheapai stats`의 session/token/model/tool 집계 |
-| account usage | `/usage`, `/credit`, `/credits`, `cheapai usage` |
+| account usage | `/usage`, `/credits`, `cheapai usage` |
 | custom commands | `.opencode/commands`, `.cheapai/commands`, `$ARGUMENTS` |
 | custom agents | `.opencode/agents`, `.cheapai/agents`, `/agent`, `--agent` |
 | run command | root prompt와 `cheapai run` |

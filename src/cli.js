@@ -217,7 +217,6 @@ export async function main(argv = process.argv) {
 
   program
     .command('credits')
-    .alias('balance')
     .description('Show remaining CheapAI credits')
     .option('--json', 'Print raw JSON', false)
     .action(async (opts) => printAccountUsage(opts));

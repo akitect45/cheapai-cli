@@ -16,12 +16,12 @@ import {
 } from '../agent/usage.js';
 
 const SPINNER = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+const TRANSIENT_ENTRY_TTL_MS = 60_000;
 const COMMANDS = [
   ['/help', 'show commands'],
   ['/status', 'session and runtime info'],
   ['/usage', 'session tokens and account spend'],
-  ['/credit', 'show balance or toggle header'],
-  ['/credits', 'refresh remaining credits'],
+  ['/credits', 'show credits or toggle header'],
   ['/compact', 'summarize old context'],
   ['/undo', 'undo last turn and tracked edits'],
   ['/redo', 'restore last undone turn'],
@@ -93,6 +93,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
   let renderTimer = null;
   let spinnerTimer = null;
   let noticeTimer = null;
+  let transientTimer = null;
   let escapeTimer = null;
   let wasRaw = false;
   let wasFlowing = null;
@@ -158,6 +159,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     mounted = false;
     clearTimeout(renderTimer);
     clearTimeout(noticeTimer);
+    clearTimeout(transientTimer);
     clearTimeout(escapeTimer);
     clearInterval(spinnerTimer);
     process.stdin.removeListener('data', onData);
@@ -448,7 +450,20 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
   function commandSuggestions() {
     if (!/^\/[^\s]*$/.test(state.input)) return [];
     const query = state.input.slice(1).toLowerCase();
-    return state.commands.filter(([command]) => command.slice(1).startsWith(query)).slice(0, 5);
+    return state.commands.filter(([command]) => command.slice(1).startsWith(query));
+  }
+
+  function visibleCommandSuggestions() {
+    const suggestions = commandSuggestions();
+    const limit = 5;
+    if (suggestions.length <= limit) {
+      return suggestions.map((suggestion, index) => ({ suggestion, index }));
+    }
+    const start = Math.max(0, Math.min(state.commandIndex - limit + 1, suggestions.length - limit));
+    return suggestions.slice(start, start + limit).map((suggestion, offset) => ({
+      suggestion,
+      index: start + offset,
+    }));
   }
 
   function moveCommand(amount) {
@@ -546,6 +561,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
   }
 
   function writeUser(text) {
+    clearTransientEntries(false);
     state.entries.push({ type: 'user', text: String(text) });
     state.contextEstimate += Math.ceil(String(text).length / 4) + 12;
     state.scroll = 0;
@@ -569,15 +585,49 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
   }
 
   function addNotice(text, tone = 'muted') {
-    state.entries.push({ type: 'notice', text: String(text), tone });
-    state.scroll = 0;
-    renderSoon();
+    addTransientEntry({ type: 'notice', text: String(text), tone });
   }
 
   function showInfo(title, rows) {
-    state.entries.push({ type: 'info', title, rows });
+    addTransientEntry({ type: 'info', title, rows });
+  }
+
+  function addTransientEntry(entry) {
+    state.entries.push({
+      ...entry,
+      transient: true,
+      expiresAt: Date.now() + TRANSIENT_ENTRY_TTL_MS,
+    });
     state.scroll = 0;
+    scheduleTransientCleanup();
     renderSoon();
+  }
+
+  function clearTransientEntries(render = true) {
+    const entries = state.entries.filter((entry) => !entry.transient);
+    if (entries.length === state.entries.length) return false;
+    state.entries = entries;
+    state.scroll = 0;
+    clearTimeout(transientTimer);
+    transientTimer = null;
+    if (render) renderSoon();
+    return true;
+  }
+
+  function scheduleTransientCleanup() {
+    clearTimeout(transientTimer);
+    const nextExpiry = state.entries
+      .filter((entry) => entry.transient)
+      .reduce((earliest, entry) => Math.min(earliest, entry.expiresAt), Infinity);
+    if (!Number.isFinite(nextExpiry)) return;
+    transientTimer = setTimeout(() => {
+      const now = Date.now();
+      state.entries = state.entries.filter((entry) => !entry.transient || entry.expiresAt > now);
+      state.scroll = 0;
+      scheduleTransientCleanup();
+      renderSoon();
+    }, Math.max(0, nextExpiry - Date.now()));
+    transientTimer.unref?.();
   }
 
   function setNotice(text, tone = 'muted') {
@@ -598,6 +648,8 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
   }
 
   function resetSession(sessionId, title = '', notice = '', messages = []) {
+    clearTimeout(transientTimer);
+    transientTimer = null;
     state.sessionId = sessionId;
     state.sessionTitle = title;
     state.entries = hydrateMessages(messages);
@@ -697,7 +749,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     if (state.busy || state.overlay || width < 20 || height < 12) return null;
     const contentWidth = Math.max(18, Math.min(width - 4, 100));
     const left = Math.max(1, Math.floor((width - contentWidth) / 2));
-    const suggestions = commandSuggestions();
+    const suggestions = visibleCommandSuggestions();
     const bodyWidth = Math.max(8, contentWidth - 4);
     const before = [...state.input].slice(0, state.cursor).join('');
     const beforeLines = wrapAnsi(before, bodyWidth);
@@ -919,10 +971,11 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
   }
 
   function renderCommandSuggestions(width) {
-    const suggestions = commandSuggestions();
+    const suggestions = visibleCommandSuggestions();
     if (!suggestions.length) return [];
-    state.commandIndex = Math.min(state.commandIndex, suggestions.length - 1);
-    return suggestions.map(([command, description], index) => {
+    const allSuggestions = commandSuggestions();
+    state.commandIndex = Math.min(state.commandIndex, allSuggestions.length - 1);
+    return suggestions.map(({ suggestion: [command, description], index }) => {
       const marker = index === state.commandIndex ? t.accent('▌') : ' ';
       const label = index === state.commandIndex ? t.bold(command) : command;
       return clipStyled(`${marker} ${label}  ${t.dim(description)}`, width);

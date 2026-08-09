@@ -732,10 +732,10 @@ export async function handleSlash(line, ctx) {
     return true;
   }
 
-  if (c === 'credit') {
+  if (c === 'credits') {
     const value = arg.toLowerCase();
     if (value && !['on', 'off'].includes(value)) {
-      notify(ctx, 'Use /credit, /credit on, or /credit off.', 'warning');
+      notify(ctx, 'Use /credits, /credits on, or /credits off.', 'warning');
       return true;
     }
     if (value) {
@@ -744,13 +744,6 @@ export async function handleSlash(line, ctx) {
       notify(ctx, `Header credit ${ctx.showBalance ? 'shown' : 'hidden'}.`, 'success');
       return true;
     }
-    const account = await ctx.refreshUsage(false);
-    if (account) notify(ctx, `credit  ${formatWon(account.balance ?? account.credits)}`, 'success');
-    else notify(ctx, 'Unable to load account credit.', 'error');
-    return true;
-  }
-
-  if (c === 'credits' || c === 'balance') {
     const account = await ctx.refreshUsage(false);
     if (account) showInfo(ctx, 'Credits', accountUsageRows(account));
     else notify(ctx, 'Unable to load account credits.', 'error');
@@ -955,8 +948,7 @@ function printHelp() {
   /help                 this help
   /status               session + auth info
   /usage                session tokens + account spend
-  /credit [on|off]      show balance once or toggle header
-  /credits              remaining account credits
+  /credits [on|off]     show account credits or toggle header
   /compact              summarize old context and continue
   /undo                 undo last turn and tracked file edits
   /redo                 restore last undone turn
@@ -990,8 +982,7 @@ function showHelp(ctx) {
     ['/help', 'show commands'],
     ['/status', 'session and runtime info'],
     ['/usage', 'session tokens and account spend'],
-    ['/credit', 'show balance once or toggle header'],
-    ['/credits', 'refresh account balance and key usage'],
+    ['/credits', 'show account credits or toggle header'],
     ['/compact', 'summarize old context and continue'],
     ['/undo', 'undo last turn and tracked edits'],
     ['/redo', 'restore last undone turn'],

@@ -346,16 +346,19 @@ console.log('cheapai e2e\n');
   const notices = [];
   let showBalance = false;
   const ctx = {
-    ui: { addNotice: (message, tone) => notices.push({ message, tone }) },
+    ui: {
+      addNotice: (message, tone) => notices.push({ message, tone }),
+      showInfo: (title, rows) => notices.push({ title, rows }),
+    },
     get showBalance() { return showBalance; },
     set showBalance(value) { showBalance = !!value; },
     async refreshUsage() { return { balance: 12345.5 }; },
   };
-  await handleSlash('/credit', ctx);
-  await handleSlash('/credit on', ctx);
-  if (!notices.some((item) => item.message.includes('₩12,345.5')) || !showBalance) {
-    bad('credit slash command', new Error(JSON.stringify({ notices, showBalance })));
-  } else ok('credit slash command');
+  await handleSlash('/credits', ctx);
+  await handleSlash('/credits on', ctx);
+  if (!notices.some((item) => item.title === 'Credits') || !showBalance) {
+    bad('credits slash command', new Error(JSON.stringify({ notices, showBalance })));
+  } else ok('credits slash command');
 
   const tmp = path.join(os.tmpdir(), `cheapai-export-${Date.now()}`);
   try {

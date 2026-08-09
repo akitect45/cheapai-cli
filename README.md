@@ -112,8 +112,7 @@ cheapai --agent reviewer
 | `/accept-edits` | 파일 수정 자동 |
 | `/status` | 세션 정보 |
 | `/usage` | 현재 세션 토큰·비용과 계정 사용액 |
-| `/credit [on|off]` | 현재 크레딧 한 줄 표시 또는 header 잔액 표시 설정 |
-| `/credits` | 계정 잔액·키 사용량 새로고침 |
+| `/credits [on|off]` | 계정 잔액·키 사용량 표시 또는 header 잔액 표시 설정 |
 | `/compact` | 오래된 대화를 요약하고 현재 작업을 유지 |
 | `/undo` | 마지막 turn과 `write_file`/`edit_file` 변경 복원 |
 | `/redo` | 마지막 undo의 대화와 추적 파일 변경 재적용 |
@@ -170,8 +169,10 @@ cheapai import session.json
 `autoCompact`가 켜져 있으면 모델 context window의 80%에 가까워질 때 CLI가
 이전 대화를 요약해 세션을 계속 유지합니다. `--no-auto-compact`로 한 번의
 실행에서 끌 수 있고, `compactThreshold`로 기준을 조정할 수 있습니다.
-잔액은 기본적으로 header에 표시하지 않습니다. `/credit`은 현재 잔액을 한 줄로
-확인하고, `/credit on`과 `/credit off`는 `showBalance` 설정을 저장합니다.
+잔액은 기본적으로 header에 표시하지 않습니다. `/credits`는 현재 계정 잔액과
+사용량을 확인하고, `/credits on`과 `/credits off`는 `showBalance` 설정을 저장합니다.
+`/help`, `/config`, `/status` 같은 slash 안내 출력은 1분 뒤 또는 다음 일반 메시지를
+전송할 때 conversation viewport에서 자동으로 정리됩니다.
 
 `Ctrl+K`는 검색 가능한 command palette를 열고, `Ctrl+Z`/`Ctrl+Y`는 마지막
 turn을 undo/redo합니다. 실행 중 `Escape` 또는 `Ctrl+C`는 생성과 실행 중인 Bash를
