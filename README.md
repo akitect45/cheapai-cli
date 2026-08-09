@@ -10,24 +10,23 @@ API: `https://api.cheapai.im/v1`
 
 ## 설치
 
-macOS / Linux:
+Node.js `>=20` 필요. macOS 기본 Terminal/iTerm2, Windows Terminal/PowerShell 권장.
+
+### 사용자 (전역 설치)
 
 ```bash
-cd /path/to/cheapai-cli
+npm install -g @akitect/cheapai
+cheapai
+```
+
+### 개발자 (이 레포에서)
+
+```bash
+git clone https://github.com/akitect45/cheapai-cli.git
+cd cheapai-cli
 npm install
 npm link
 ```
-
-Windows PowerShell:
-
-```powershell
-cd C:\projects\cheapai-cli
-npm install
-npm link
-```
-
-Node.js `>=20`와 ANSI/raw keyboard input을 지원하는 터미널이 필요합니다.
-macOS 기본 Terminal/iTerm2, Windows Terminal/PowerShell에서 사용할 수 있습니다.
 
 ## 시작 흐름
 

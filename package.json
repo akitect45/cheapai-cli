@@ -1,11 +1,17 @@
 {
-  "name": "cheapai",
+  "name": "@akitect/cheapai",
   "version": "0.3.0",
   "description": "CheapAI coding agent with a focused terminal workspace",
   "type": "module",
   "bin": {
-    "cheapai": "./bin/cheapai.js"
+    "cheapai": "bin/cheapai.js"
   },
+  "files": [
+    "bin",
+    "src",
+    "docs",
+    "README.md"
+  ],
   "scripts": {
     "start": "node bin/cheapai.js",
     "cheapai": "node bin/cheapai.js",
@@ -25,6 +31,14 @@
     "coding-agent"
   ],
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/akitect45/cheapai-cli.git"
+  },
+  "homepage": "https://github.com/akitect45/cheapai-cli#readme",
+  "bugs": {
+    "url": "https://github.com/akitect45/cheapai-cli/issues"
+  },
   "dependencies": {
     "commander": "^13.1.0",
     "openai": "^4.104.0"
