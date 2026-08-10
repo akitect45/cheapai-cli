@@ -507,9 +507,16 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     renderNow();
   }
 
-  function pick({ title, subtitle, options, initialIndex = 0, searchable = false }) {
+  function pick({ title, subtitle, options, initialIndex = 0, searchable = false, signal = null }) {
     return new Promise((resolve) => {
-      state.overlay = {
+      let settled = false;
+      const finish = (value) => {
+        if (settled) return;
+        settled = true;
+        signal?.removeEventListener('abort', abort);
+        resolve(value);
+      };
+      const overlay = {
         type: 'picker',
         title,
         subtitle,
@@ -517,17 +524,30 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
         index: Math.max(0, initialIndex),
         query: '',
         searchable,
-        resolve,
+        resolve: finish,
       };
+      const abort = () => {
+        if (state.overlay !== overlay) return;
+        state.overlay = null;
+        renderNow();
+        finish(null);
+      };
+      state.overlay = overlay;
+      signal?.addEventListener('abort', abort, { once: true });
+      if (signal?.aborted) {
+        abort();
+        return;
+      }
       renderNow();
     });
   }
 
-  async function requestPermission(toolName, detail) {
+  async function requestPermission(toolName, detail, { signal = null } = {}) {
     const label = toolLabel(toolName);
     const choice = await pick({
       title: `Permission · ${label}`,
       subtitle: sanitizeTerminalText(detail),
+      signal,
       options: [
         { label: 'Allow once', hint: 'Run this operation', action: true },
         { label: 'Allow always', hint: 'All tools until exit', action: 'always' },
@@ -543,6 +563,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
         { label: 'Cancel', action: false },
       ],
       initialIndex: 1,
+      signal,
     });
     return confirm === 'always' ? 'always' : false;
   }

@@ -8,6 +8,15 @@ export const DEFAULT_MODEL = 'claude-sonnet-5';
 /** Device-code endpoints on the web origin (server-side, in progress) */
 export const DEVICE_CODE_PATH = '/api/auth/device/code';
 export const DEVICE_POLL_PATH = '/api/auth/device/poll';
+const PROJECT_CONFIG_KEYS = new Set([
+  'model',
+  'maxTurns',
+  'temperature',
+  'reasoningEffort',
+  'showThinking',
+  'autoCompact',
+  'compactThreshold',
+]);
 
 export function homeDir() {
   return process.env.CHEAPAI_HOME || path.join(os.homedir(), '.cheapai');
@@ -15,9 +24,14 @@ export function homeDir() {
 
 export function ensureHome() {
   const dir = homeDir();
-  for (const sub of ['', 'sessions', 'cache']) {
+  for (const sub of ['', 'sessions', 'cache', 'locks', 'recovery']) {
     const p = sub ? path.join(dir, sub) : dir;
-    if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true });
+    if (!fs.existsSync(p)) fs.mkdirSync(p, { recursive: true, mode: 0o700 });
+    try {
+      fs.chmodSync(p, 0o700);
+    } catch {
+      /* Windows may ignore POSIX modes. */
+    }
   }
   return dir;
 }
@@ -72,6 +86,9 @@ export function loadConfig() {
     showBalance: false,
     autoCompact: true,
     compactThreshold: 0.8,
+    pathMode: 'workspace',
+    extraRoots: [],
+    approvedExtensions: [],
   };
   if (!fs.existsSync(p)) return defaults;
   try {
@@ -81,9 +98,39 @@ export function loadConfig() {
   }
 }
 
+export function loadScopedConfig(cwd = process.cwd()) {
+  const base = loadConfig();
+  const roots = [];
+  let dir = path.resolve(cwd);
+  const root = path.parse(dir).root;
+  while (true) {
+    roots.push(path.join(dir, '.cheapai', 'config.json'));
+    if (dir === root) break;
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+  const projectConfig = roots.reverse().reduce((result, filePath) => {
+    if (!fs.existsSync(filePath)) return result;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf8'));
+      const allowed = Object.fromEntries(Object.entries(parsed).filter(([key]) => PROJECT_CONFIG_KEYS.has(key)));
+      return { ...result, ...allowed };
+    } catch {
+      return result;
+    }
+  }, {});
+  return { ...base, ...projectConfig };
+}
+
 export function saveConfig(cfg) {
   ensureHome();
-  fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2), 'utf8');
+  fs.writeFileSync(configPath(), JSON.stringify(cfg, null, 2), { encoding: 'utf8', mode: 0o600 });
+  try {
+    fs.chmodSync(configPath(), 0o600);
+  } catch {
+    /* Windows may ignore POSIX modes. */
+  }
 }
 
 export function resolveApiKey(auth = loadAuth()) {

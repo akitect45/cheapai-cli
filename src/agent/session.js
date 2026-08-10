@@ -2,6 +2,19 @@ import fs from 'node:fs';
 import path from 'node:path';
 import crypto from 'node:crypto';
 import { ensureHome, homeDir } from '../config.js';
+import {
+  appendSessionEntry as appendLogEntry,
+  appendSessionSnapshot,
+  assertSessionId,
+  atomicWriteFile,
+  legacySessionPath,
+  loadSessionLog,
+  migrateLegacySession,
+  v2SessionPath,
+} from './session-format.js';
+import { acquireSessionLease, verifySessionLease } from './session-lock.js';
+
+const SESSION_LEASES = new WeakMap();
 
 export function sessionsDir() {
   ensureHome();
@@ -13,44 +26,40 @@ export function newSessionId() {
 }
 
 export function sessionPath(id) {
-  return path.join(sessionsDir(), `${id}.json`);
+  return v2SessionPath(sessionsDir(), id);
 }
 
 export function saveSession(session) {
   ensureHome();
+  assertSessionId(session?.id);
+  const boundLease = SESSION_LEASES.get(session);
+  const temporaryLease = boundLease ? null : acquireSession(session.id);
+  if (boundLease) verifySessionLease(boundLease);
+  session.updatedAt = new Date().toISOString();
+  session.storageVersion = 2;
   const p = sessionPath(session.id);
-  fs.writeFileSync(
-    p,
-    JSON.stringify(
-      {
-        ...session,
-        updatedAt: new Date().toISOString(),
-      },
-      null,
-      2,
-    ),
-    'utf8',
-  );
-  // index by cwd
-  const idxPath = path.join(sessionsDir(), 'index.jsonl');
-  fs.appendFileSync(
-    idxPath,
-    JSON.stringify({
-      id: session.id,
-      cwd: session.cwd,
-      updatedAt: new Date().toISOString(),
-      title: session.title || '',
-    }) + '\n',
-    'utf8',
-  );
-  return p;
+  try {
+    const oldPath = legacySessionPath(sessionsDir(), session.id);
+    if (fs.existsSync(oldPath) && fs.existsSync(p) && fs.statSync(oldPath).mtimeMs > fs.statSync(p).mtimeMs) {
+      const error = new Error('A newer legacy session writer was detected; refusing to overwrite it.');
+      error.code = 'session_format_conflict';
+      throw error;
+    }
+    appendSessionSnapshot(p, session);
+    rebuildSessionIndex();
+    return p;
+  } finally {
+    temporaryLease?.release();
+  }
 }
 
 export function loadSession(id) {
-  const p = sessionPath(id);
-  if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
-  const matches = listAllSessions().filter((session) => session.id.startsWith(String(id || '')));
-  return matches.length === 1 ? matches[0] : null;
+  const candidate = String(id || '');
+  if (!/^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$/.test(candidate)) return null;
+  const exact = loadStoredSession(candidate);
+  if (exact) return exact;
+  const matches = listAllSessions().filter((session) => session.id.startsWith(candidate));
+  return matches.length === 1 ? loadStoredSession(matches[0].id) : null;
 }
 
 export function findLatestSession(cwd) {
@@ -59,17 +68,18 @@ export function findLatestSession(cwd) {
   const target = comparableWorkspace(cwd);
   const files = fs
     .readdirSync(dir)
-    .filter((f) => f.endsWith('.json') && f !== 'index.jsonl')
-    .map((f) => {
-      const full = path.join(dir, f);
+    .filter(isSessionFilename)
+    .map((file) => {
+      const id = sessionIdFromFilename(file);
       try {
-        const data = JSON.parse(fs.readFileSync(full, 'utf8'));
-        return { data, mtime: fs.statSync(full).mtimeMs };
+        const data = loadStoredSession(id);
+        return data ? { data, mtime: storedSessionMtime(dir, id) } : null;
       } catch {
         return null;
       }
     })
     .filter(Boolean)
+    .filter((item, index, items) => items.findIndex((candidate) => candidate.data.id === item.data.id) === index)
     .filter((x) => comparableWorkspace(x.data.cwd || '') === target)
     .sort((a, b) => b.mtime - a.mtime);
   return files[0]?.data || null;
@@ -79,16 +89,8 @@ export function listSessions(cwd) {
   const dir = sessionsDir();
   if (!fs.existsSync(dir)) return [];
   const target = comparableWorkspace(cwd);
-  return fs
-    .readdirSync(dir)
-    .filter((file) => file.endsWith('.json') && file !== 'index.jsonl')
-    .map((file) => {
-      try {
-        return JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
-      } catch {
-        return null;
-      }
-    })
+  return storedSessionIds(dir)
+    .map((id) => loadStoredSession(id, { readOnly: true }))
     .filter((session) => session && comparableWorkspace(session.cwd || '') === target)
     .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
 }
@@ -96,16 +98,8 @@ export function listSessions(cwd) {
 export function listAllSessions() {
   const dir = sessionsDir();
   if (!fs.existsSync(dir)) return [];
-  return fs
-    .readdirSync(dir)
-    .filter((file) => file.endsWith('.json') && file !== 'index.jsonl')
-    .map((file) => {
-      try {
-        return JSON.parse(fs.readFileSync(path.join(dir, file), 'utf8'));
-      } catch {
-        return null;
-      }
-    })
+  return storedSessionIds(dir)
+    .map((id) => loadStoredSession(id, { readOnly: true }))
     .filter(Boolean)
     .sort((a, b) => new Date(b.updatedAt || 0) - new Date(a.updatedAt || 0));
 }
@@ -113,10 +107,80 @@ export function listAllSessions() {
 export function deleteSession(id) {
   const session = loadSession(id);
   if (!session) return false;
-  const target = sessionPath(session.id);
-  if (!fs.existsSync(target)) return false;
-  fs.unlinkSync(target);
-  return true;
+  const lease = acquireSession(session.id);
+  try {
+    const targets = [
+      sessionPath(session.id),
+      legacySessionPath(sessionsDir(), session.id),
+      `${legacySessionPath(sessionsDir(), session.id)}.v1.bak`,
+    ];
+    let deleted = false;
+    for (const target of targets) {
+      if (!fs.existsSync(target)) continue;
+      fs.unlinkSync(target);
+      deleted = true;
+    }
+    if (deleted) rebuildSessionIndex();
+    return deleted;
+  } finally {
+    lease.release();
+  }
+}
+
+export function acquireSession(id) {
+  const sessionId = assertSessionId(id);
+  return acquireSessionLease(sessionPath(sessionId), sessionId);
+}
+
+export function bindSessionLease(session, lease) {
+  if (!session || session.id !== lease?.sessionId) throw new Error('Session lease does not match the session.');
+  verifySessionLease(lease);
+  SESSION_LEASES.set(session, lease);
+  return session;
+}
+
+export function releaseSessionLease(session) {
+  const lease = SESSION_LEASES.get(session);
+  SESSION_LEASES.delete(session);
+  lease?.release();
+}
+
+export function transferSessionLease(previousSession, nextSession) {
+  const lease = SESSION_LEASES.get(previousSession);
+  if (!lease || previousSession?.id !== nextSession?.id) {
+    const error = new Error('Session lease transfer requires two objects for the same active session.');
+    error.code = 'invalid_session_lease_transfer';
+    throw error;
+  }
+  verifySessionLease(lease);
+  SESSION_LEASES.delete(previousSession);
+  SESSION_LEASES.set(nextSession, lease);
+  return lease;
+}
+
+export function appendSessionEntry(sessionOrId, type, payload) {
+  const session = typeof sessionOrId === 'object' ? sessionOrId : null;
+  const id = assertSessionId(session?.id || sessionOrId);
+  const boundLease = session ? SESSION_LEASES.get(session) : null;
+  const temporaryLease = boundLease ? null : acquireSession(id);
+  if (boundLease) verifySessionLease(boundLease);
+  try {
+    return appendLogEntry(sessionPath(id), type, payload);
+  } finally {
+    temporaryLease?.release();
+  }
+}
+
+export function rebuildSessionIndex() {
+  const indexPath = path.join(sessionsDir(), 'index.jsonl');
+  const lines = listAllSessions().map((session) => JSON.stringify({
+    id: session.id,
+    cwd: session.cwd,
+    updatedAt: session.updatedAt,
+    title: session.title || '',
+  }));
+  atomicWriteFile(indexPath, lines.length ? `${lines.join('\n')}\n` : '');
+  return indexPath;
 }
 
 export function forkSession(source, { title } = {}) {
@@ -227,6 +291,90 @@ export function createSession({ cwd, model, systemPrompt }) {
     compactions: [],
     messages: [{ role: 'system', content: systemPrompt }],
   };
+}
+
+function loadStoredSession(id, { readOnly = false } = {}) {
+  let sessionId;
+  try {
+    sessionId = assertSessionId(id);
+  } catch {
+    return null;
+  }
+  const directory = sessionsDir();
+  const currentPath = v2SessionPath(directory, sessionId);
+  if (fs.existsSync(currentPath)) {
+    try {
+      const legacyPath = legacySessionPath(directory, sessionId);
+      const legacyIsNewer = fs.existsSync(legacyPath)
+        && fs.statSync(legacyPath).mtimeMs > fs.statSync(currentPath).mtimeMs;
+      if (legacyIsNewer) {
+        const legacy = JSON.parse(fs.readFileSync(legacyPath, 'utf8'));
+        if (readOnly) return legacy?.id === sessionId ? legacy : null;
+        const lease = acquireSession(sessionId);
+        try {
+          migrateLegacySession(directory, legacy, { replace: true });
+        } finally {
+          lease.release();
+        }
+      }
+      const parsed = loadSessionLog(currentPath, { repair: false });
+      if (!parsed.recoveredFinalLine || readOnly) return parsed.session;
+      const lease = acquireSession(sessionId);
+      try {
+        return loadSessionLog(currentPath, { repair: true }).session;
+      } finally {
+        lease.release();
+      }
+    } catch {
+      return null;
+    }
+  }
+
+  const oldPath = legacySessionPath(directory, sessionId);
+  if (!fs.existsSync(oldPath)) return null;
+  try {
+    const legacy = JSON.parse(fs.readFileSync(oldPath, 'utf8'));
+    if (legacy?.id !== sessionId) return null;
+    if (readOnly) return legacy;
+    const lease = acquireSession(sessionId);
+    try {
+      migrateLegacySession(directory, legacy);
+      return loadSessionLog(currentPath, { repair: false }).session;
+    } finally {
+      lease.release();
+    }
+  } catch {
+    return null;
+  }
+}
+
+function storedSessionIds(directory) {
+  return [...new Set(fs.readdirSync(directory)
+    .filter(isSessionFilename)
+    .map(sessionIdFromFilename)
+    .filter(Boolean))];
+}
+
+function storedSessionMtime(directory, id) {
+  return Math.max(...[v2SessionPath(directory, id), legacySessionPath(directory, id)]
+    .filter((file) => fs.existsSync(file))
+    .map((file) => fs.statSync(file).mtimeMs));
+}
+
+function isSessionFilename(file) {
+  if (file === 'index.jsonl') return false;
+  return file.endsWith('.jsonl') || file.endsWith('.json');
+}
+
+function sessionIdFromFilename(file) {
+  const extension = file.endsWith('.jsonl') ? '.jsonl' : file.endsWith('.json') ? '.json' : '';
+  if (!extension) return null;
+  const id = file.slice(0, -extension.length);
+  try {
+    return assertSessionId(id);
+  } catch {
+    return null;
+  }
 }
 
 export function comparableWorkspace(cwd, platform = process.platform) {

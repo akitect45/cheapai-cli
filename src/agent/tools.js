@@ -1,10 +1,12 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { spawn } from 'node:child_process';
-import { pathToFileURL } from 'node:url';
 import { snapshotFile } from './history.js';
+import { atomicWriteFile } from './session-format.js';
+import { createPathPolicy } from './path-policy.js';
+import { runProcess, shellInvocation } from './process-runner.js';
+import { createToolRegistry, toToolDefinition } from './tool-contract.js';
 
-export const TOOL_DEFINITIONS = [
+const TOOL_WIRE_SPECS = [
   {
     type: 'function',
     function: {
@@ -139,71 +141,41 @@ export const TOOL_DEFINITIONS = [
   },
 ];
 
-export function createToolRuntime({ cwd, onTodo, onFileChange, onBash } = {}) {
+const TOOL_POLICIES = {
+  bash: { execution: 'sequential', sideEffect: 'process' },
+  read_file: { execution: 'parallel', sideEffect: 'none' },
+  write_file: { execution: 'sequential', sideEffect: 'filesystem' },
+  edit_file: { execution: 'sequential', sideEffect: 'filesystem' },
+  glob: { execution: 'parallel', sideEffect: 'none' },
+  grep: { execution: 'parallel', sideEffect: 'none' },
+  todo_write: { execution: 'sequential', sideEffect: 'none' },
+};
+
+export const BUILTIN_TOOL_SPECS = TOOL_WIRE_SPECS.map((definition) => ({
+  name: definition.function.name,
+  description: definition.function.description,
+  parameters: definition.function.parameters,
+  ...TOOL_POLICIES[definition.function.name],
+}));
+
+export const TOOL_DEFINITIONS = BUILTIN_TOOL_SPECS.map(toToolDefinition);
+
+export function createToolRuntime({
+  cwd,
+  onTodo,
+  onFileChange,
+  onBash,
+  onProcessStart,
+  pathMode = 'workspace',
+  extraRoots = [],
+  customTools = [],
+} = {}) {
   const root = path.resolve(cwd || process.cwd());
+  const pathPolicy = createPathPolicy({ cwd: root, mode: pathMode, extraRoots });
   let todos = [];
 
   function resolveSafe(p) {
-    const abs = path.isAbsolute(p) ? path.resolve(p) : path.resolve(root, p);
-    // allow any path for a local coding agent; still normalize
-    return abs;
-  }
-
-  async function runBash(command, timeout_ms = 120_000, signal) {
-    return new Promise((resolve) => {
-      const [shell, args] = shellInvocation(command);
-      const child = spawn(shell, args, {
-        cwd: root,
-        env: process.env,
-        windowsHide: true,
-      });
-      let stdout = '';
-      let stderr = '';
-      let settled = false;
-      const finish = (result) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timer);
-        signal?.removeEventListener('abort', abort);
-        resolve(result);
-      };
-      const abort = () => {
-        child.kill('SIGTERM');
-        finish({ ok: false, exit_code: null, aborted: true, stdout: stdout.slice(-30_000), stderr: stderr.slice(-20_000) });
-      };
-      const timer = setTimeout(() => {
-        child.kill('SIGTERM');
-        finish({
-          ok: false,
-          exit_code: null,
-          timed_out: true,
-          stdout: stdout.slice(-30_000),
-          stderr: (stderr + '\n[timeout]').slice(-10_000),
-        });
-      }, timeout_ms);
-      child.stdout.on('data', (d) => {
-        stdout += d.toString();
-        if (stdout.length > 200_000) stdout = stdout.slice(-150_000);
-      });
-      child.stderr.on('data', (d) => {
-        stderr += d.toString();
-        if (stderr.length > 100_000) stderr = stderr.slice(-80_000);
-      });
-      child.on('close', (code) => {
-        finish({
-          ok: code === 0,
-          exit_code: code,
-          timed_out: false,
-          stdout: stdout.slice(-50_000),
-          stderr: stderr.slice(-20_000),
-        });
-      });
-      child.on('error', (err) => {
-        finish({ ok: false, exit_code: null, error: String(err), stdout, stderr });
-      });
-      signal?.addEventListener('abort', abort, { once: true });
-      if (signal?.aborted) abort();
-    });
+    return pathPolicy.resolve(p);
   }
 
   function readFile(filePath, offset, limit) {
@@ -227,7 +199,7 @@ export function createToolRuntime({ cwd, onTodo, onFileChange, onBash } = {}) {
     const abs = resolveSafe(filePath);
     const before = snapshotFile(abs);
     fs.mkdirSync(path.dirname(abs), { recursive: true });
-    fs.writeFileSync(abs, content, 'utf8');
+    atomicWriteFile(abs, content, { mode: existingFileMode(abs) });
     const after = snapshotFile(abs);
     onFileChange?.({ path: abs, before, after, restorable: before.restorable !== false && after.restorable !== false });
     return { ok: true, path: abs, bytes: Buffer.byteLength(content, 'utf8') };
@@ -246,7 +218,7 @@ export function createToolRuntime({ cwd, onTodo, onFileChange, onBash } = {}) {
       return { error: `old_string matched ${count} times; set replace_all=true or make it unique` };
     }
     const next = replace_all ? text.split(old_string).join(new_string) : text.replace(old_string, new_string);
-    fs.writeFileSync(abs, next, 'utf8');
+    atomicWriteFile(abs, next, { mode: existingFileMode(abs) });
     const after = snapshotFile(abs);
     onFileChange?.({ path: abs, before, after, restorable: before.restorable !== false && after.restorable !== false });
     return { ok: true, path: abs, replacements: replace_all ? count : 1 };
@@ -295,9 +267,19 @@ export function createToolRuntime({ cwd, onTodo, onFileChange, onBash } = {}) {
         if (ent.name === 'node_modules' || ent.name === '.git' || ent.name === 'dist') continue;
         const full = path.join(dir, ent.name);
         const rel = path.relative(base, full).replace(/\\/g, '/');
-        if (ent.isDirectory()) walk(full);
-        else if (matchGlob(rel, pattern) || matchGlob(ent.name, pattern)) {
-          results.push(full);
+        if (ent.isDirectory() && !ent.isSymbolicLink()) {
+          walk(full);
+          continue;
+        }
+        let safeFull;
+        try {
+          safeFull = resolveSafe(full);
+          if (fs.statSync(safeFull).isDirectory()) continue;
+        } catch {
+          continue;
+        }
+        if (matchGlob(rel, pattern) || matchGlob(ent.name, pattern)) {
+          results.push(safeFull);
         }
       }
     }
@@ -335,9 +317,15 @@ export function createToolRuntime({ cwd, onTodo, onFileChange, onBash } = {}) {
 
     for (const fp of files) {
       if (matches.length >= max_matches) break;
+      let safePath;
+      try {
+        safePath = resolveSafe(fp);
+      } catch {
+        continue;
+      }
       let text;
       try {
-        text = fs.readFileSync(fp, 'utf8');
+        text = fs.readFileSync(safePath, 'utf8');
       } catch {
         continue;
       }
@@ -346,18 +334,28 @@ export function createToolRuntime({ cwd, onTodo, onFileChange, onBash } = {}) {
       for (let i = 0; i < lines.length; i++) {
         if (matches.length >= max_matches) break;
         if (re.test(lines[i])) {
-          matches.push({ path: fp, line: i + 1, text: lines[i].slice(0, 300) });
+          matches.push({ path: safePath, line: i + 1, text: lines[i].slice(0, 300) });
         }
       }
     }
     return { matches, truncated: matches.length >= max_matches };
   }
 
-  async function execute(name, args, { signal } = {}) {
+  async function executeImplementation(name, args, { signal, operationId, onUpdate, onProcess } = {}) {
     switch (name) {
       case 'bash':
         onBash?.(args.command);
-        return runBash(args.command, args.timeout_ms || 120_000, signal);
+        return runProcess({
+          command: args.command,
+          cwd: root,
+          timeoutMs: args.timeout_ms || 120_000,
+          signal,
+          onStart: (processRecord) => {
+            onProcessStart?.(operationId, processRecord);
+            onProcess?.(processRecord);
+            onUpdate?.({ type: 'process_started', ...processRecord });
+          },
+        });
       case 'read_file':
         return readFile(args.path, args.offset, args.limit);
       case 'write_file':
@@ -385,19 +383,56 @@ export function createToolRuntime({ cwd, onTodo, onFileChange, onBash } = {}) {
     }
   }
 
+  const builtinContracts = BUILTIN_TOOL_SPECS.map((spec) => ({
+    ...spec,
+    execute(callId, args, context) {
+      return executeImplementation(spec.name, args, { ...context, operationId: callId });
+    },
+  }));
+  const extensionContracts = customTools.map((tool) => ({
+    execution: 'sequential',
+    sideEffect: 'none',
+    ...tool,
+  }));
+  const contracts = [...builtinContracts, ...extensionContracts];
+  const registry = createToolRegistry(contracts);
+
+  async function execute(name, args, context = {}) {
+    const validation = registry.validate(name, args);
+    if (!validation.ok) {
+      return { ok: false, error: validation.error.message, code: validation.error.code };
+    }
+    try {
+      const result = await validation.tool.execute(context.callId || name, args, context);
+      return result === undefined ? { ok: true } : result;
+    } catch (error) {
+      return { ok: false, error: String(error?.message || error), code: error?.code || 'tool_error' };
+    }
+  }
+
   function detailFor(name, args) {
     if (name === 'bash') return args.command;
     if (name === 'write_file' || name === 'edit_file' || name === 'read_file') return args.path;
     return JSON.stringify(args).slice(0, 200);
   }
 
-  return { execute, detailFor, root, getTodos: () => todos };
+  return {
+    execute,
+    detailFor,
+    root,
+    pathPolicy,
+    registry,
+    tools: contracts,
+    getTodos: () => todos,
+  };
 }
 
-export function shellInvocation(command, platform = process.platform, env = process.env) {
-  if (platform === 'win32') return [env.ComSpec || 'cmd.exe', ['/c', command]];
-  return ['bash', ['-lc', command]];
+function existingFileMode(filePath) {
+  try {
+    return fs.statSync(filePath).mode & 0o777;
+  } catch {
+    return 0o666;
+  }
 }
 
-// silence unused import warning in some bundlers
-void pathToFileURL;
+export { shellInvocation };

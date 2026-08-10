@@ -169,7 +169,10 @@ Agent profile은 `.opencode/agents/*.md`, `.cheapai/agents/*.md`,
 
 ## 세션과 저장 위치
 
-세션은 `~/.cheapai/sessions/<id>.json`에 저장됩니다. `CHEAPAI_HOME`을 설정하면
+세션은 `~/.cheapai/sessions/<id>.jsonl`에 v2 append log로 저장됩니다.
+기존 `<id>.json` snapshot은 처음 resume할 때 owner-only JSONL로 migration되고
+`.v1.bak`으로 보존됩니다. 마지막 JSONL line이 중간에 끊겼으면 lease를 확보한 뒤
+그 line만 제거하고 마지막 durable snapshot을 복원합니다. `CHEAPAI_HOME`을 설정하면
 기본 디렉터리를 바꿀 수 있습니다.
 
 ```powershell
@@ -206,6 +209,12 @@ Undo history는 최근 20개 turn, 최대 약 2MB로 제한됩니다. `write_fil
 `bash`는 임의의 외부 상태를 바꿀 수 있으므로 대화는 undo하되 shell 변경은
 자동 복원하지 않습니다.
 
+같은 session에는 한 process만 writer lease를 가질 수 있습니다. 파일 변경과 Bash는
+별도 operation journal에 `received → started → completed/failed/uncertain` 상태를
+기록하며, crash 뒤 불확실한 operation은 자동 재실행하지 않고 transcript에 error
+tool result로 복원합니다. Bash timeout/abort는 Unix process group 또는 Windows
+process tree를 종료합니다. 이 경계는 process lifecycle 관리이며 sandbox가 아닙니다.
+
 ## 인증과 credential
 
 기본 인증은 browser device-code 흐름입니다. API 키를 직접 입력할 수도 있습니다.
@@ -236,14 +245,22 @@ src/ui/select.js       keyboard picker와 non-TTY numeric fallback
 src/ui/draw.js         terminal width, CJK/emoji 폭, wrapping, tool summary
 src/ui/theme.js        ANSI semantic theme와 NO_COLOR 처리
 src/ui/input.js        masked secret input
-src/agent/loop.js      streaming LLM loop, tool lifecycle, session persistence
+src/agent/loop.js      기존 runAgentLoop API를 유지하는 compatibility facade
+src/agent/runtime.js   event stream, queues, budgets, tool lifecycle
+src/agent/events.js    monotonic runtime event envelope
 src/agent/usage.js     token/cost 집계, context 추정과 usage 표시 형식
 src/agent/compact.js   대화 요약과 context compaction
 src/agent/export.js    Markdown transcript export
 src/agent/history.js   turn checkpoint, 파일 snapshot, undo/redo
-src/agent/commands.js   project/user custom command loader와 template renderer
+src/agent/commands.js  resource command facade와 custom agent loader
 src/agent/permissions.js permission policy와 approval fallback
-src/agent/session.js   session JSON 저장, continue/resume 조회
+src/agent/session.js   v2 JSONL facade, lease-bound writer, continue/resume 조회
+src/agent/session-format.js JSONL parser, migration, atomic rewrite
+src/agent/operation-journal.js side-effect idempotency와 uncertain recovery
+src/agent/process-runner.js process group/tree timeout과 abort
+src/agent/tool-contract.js AJV schema와 side-effect/execution contract
+src/llm/providers.js   provider registry와 OpenAI-compatible adapter
+src/resources/         command/skill/trusted extension discovery
 ```
 
 Fullscreen UI는 `createFullscreenChatUi()`가 상태를 소유하고,

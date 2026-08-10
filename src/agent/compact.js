@@ -1,5 +1,6 @@
 import { saveSession } from './session.js';
 import { estimateMessagesTokens, mergeSessionUsage } from './usage.js';
+import { getProvider } from '../llm/providers.js';
 
 const SUMMARY_MAX_CHARS = 120_000;
 const MESSAGE_MAX_CHARS = 14_000;
@@ -21,7 +22,8 @@ export async function compactSession({ client, model, session }) {
   }
 
   const transcript = serializeConversation(sourceMessages);
-  const response = await client.chat.completions.create({
+  const response = await getProvider('openai-compatible').complete({
+    client,
     model,
     messages: [
       {
@@ -37,8 +39,7 @@ export async function compactSession({ client, model, session }) {
       { role: 'user', content: `Conversation to compact:\n\n${transcript}` },
     ],
     temperature: 0.1,
-    max_tokens: Math.min(3200, Math.max(512, Math.floor(sourceTokens * 0.25))),
-    stream: false,
+    maxTokens: Math.min(3200, Math.max(512, Math.floor(sourceTokens * 0.25))),
   });
   const summary = messageText(response.choices?.[0]?.message?.content).trim();
   if (!summary) throw new Error('Compaction returned an empty summary.');

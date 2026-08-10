@@ -16,7 +16,8 @@
     "start": "node bin/cheapai.js",
     "cheapai": "node bin/cheapai.js",
     "login": "node bin/cheapai.js login",
-    "test": "node scripts/test-e2e.mjs",
+    "test": "node scripts/test-unit.mjs && node scripts/test-e2e.mjs",
+    "test:unit": "node scripts/test-unit.mjs",
     "test:smoke": "node bin/cheapai.js models",
     "test:live": "node scripts/test-e2e.mjs --live",
     "test:poll": "node scripts/test-e2e.mjs --poll-shape"
@@ -40,7 +41,9 @@
     "url": "https://github.com/akitect45/cheapai-cli/issues"
   },
   "dependencies": {
+    "ajv": "^8.20.0",
     "commander": "^13.1.0",
+    "jiti": "^2.7.0",
     "openai": "^4.104.0"
   }
 }

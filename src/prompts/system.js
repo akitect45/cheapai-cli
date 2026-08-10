@@ -1,6 +1,7 @@
 import os from 'node:os';
 import path from 'node:path';
 import { findProjectInstructions } from '../config.js';
+import { discoverSkills } from '../resources/skills.js';
 
 /**
  * Claude Code–style system prompt: tool discipline, edit policy, environment facts.
@@ -11,6 +12,9 @@ export function buildSystemPrompt({ cwd, model, goalMode = false, agentInstructi
   const instructions = findProjectInstructions(root);
   const projectBlocks = instructions
     .map((i) => `### From \`${i.path}\`\n${i.text}`)
+    .join('\n\n');
+  const skillBlocks = discoverSkills(root)
+    .map((skill) => `### ${skill.name} (${skill.path})\n${skill.body}`)
     .join('\n\n');
 
   const platform =
@@ -88,6 +92,9 @@ You are in goal mode. Define the desired outcome, success criteria, constraints,
 ${agentInstructions ? `# Agent profile
 ${agentInstructions}
 ` : ''}
+
+# Available skills
+${skillBlocks || '_No approved skill files found. Skill files are context only and are never executed._'}
 
 # Project instructions
 (Always follow these when present; they override general style but not hard safety rules.)

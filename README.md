@@ -142,6 +142,14 @@ cheapai --agent reviewer
 Agent profile은 같은 위치의 `agents/*.md`에서 로드되며 `/agent` 또는
 `cheapai --agent <name>`으로 선택합니다.
 
+Skill은 `.cheapai/skills/<name>/SKILL.md`에서 발견되어 bounded prompt context로만
+사용되며 실행되지 않습니다. Local JS/TS extension은 `.cheapai/extensions/`에서
+발견되지만 `approvedExtensions`에 path 또는 SHA-256이 명시된 경우에만 trusted code로
+로드됩니다. Extension approval은 owner-owned `~/.cheapai/config.json`에서만 읽으며
+canonical absolute path만 허용합니다. Project `.cheapai/config.json`은 스스로 실행
+권한을 부여할 수 없습니다. Extension은
+tool, command, runtime event hook을 등록할 수 있습니다.
+
 ## 설정
 
 `~/.cheapai/config.json`, `auth.json`, `sessions/`
@@ -165,6 +173,14 @@ cheapai import session.json
 기본 설정 디렉터리는 `~/.cheapai`입니다. 테스트나 격리된 실행에서는
 `CHEAPAI_HOME`으로 저장 위치를 변경할 수 있습니다. API 키는
 `CHEAPAI_API_KEY`, `CHEAPSUB_API_KEY` 순서로 환경변수도 확인합니다.
+세션은 `sessions/<id>.jsonl`의 v2 append log로 저장되고, 기존 `<id>.json`은 처음
+resume할 때 v2로 migration됩니다. 세션 writer는 process identity가 포함된 lease를
+사용하며 파일과 recovery journal은 owner-only 권한으로 생성됩니다.
+기본 `pathMode`는 `workspace`이고 `workspace-plus`에서는 `extraRoots`를 추가할 수
+있습니다. `yolo`는 file tool 경로를 `unrestricted`로 전환합니다. Bash는 process
+group 단위로 취소되지만 filesystem sandbox는 아니며 provider credential을 상속하지 않습니다.
+`pathMode`, `extraRoots`, `approvedExtensions`, provider endpoint와 permission mode는
+global config 전용이며 project config에서는 무시됩니다.
 `autoCompact`가 켜져 있으면 모델 context window의 80%에 가까워질 때 CLI가
 이전 대화를 요약해 세션을 계속 유지합니다. `--no-auto-compact`로 한 번의
 실행에서 끌 수 있고, `compactThreshold`로 기준을 조정할 수 있습니다.
@@ -192,6 +208,7 @@ node --check src/ui/fullscreen.js
 git diff --check
 ```
 
-`npm test`는 에이전트 도구, 권한 정책, terminal wrapping과 fullscreen
+`npm test`는 session migration/lease/recovery, runtime event/queue, tool schema와
+process cleanup, provider retry, resource/extension 경계, terminal wrapping과 fullscreen
 responsive frame을 함께 검사합니다. 구현 상세는 [TUI 문서](./docs/TUI.md)에
 정리되어 있습니다.

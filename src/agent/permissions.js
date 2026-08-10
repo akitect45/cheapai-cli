@@ -7,7 +7,11 @@ const READ_TOOLS = new Set(['read_file', 'glob', 'grep']);
 /**
  * @param {'ask'|'auto'|'accept-edits'|'yolo'} mode
  */
-export function createPermissionGate(mode = 'ask', requestApproval = null, { interactive, allowTodo = false } = {}) {
+export function createPermissionGate(mode = 'ask', requestApproval = null, {
+  interactive,
+  allowTodo = false,
+  toolResolver = null,
+} = {}) {
   const m = mode || 'ask';
   const canPrompt = interactive ?? (process.stdin.isTTY && process.stdout.isTTY);
 
@@ -15,16 +19,19 @@ export function createPermissionGate(mode = 'ask', requestApproval = null, { int
     mode: m,
     requiresApproval(toolName) {
       if (m === 'yolo') return false;
-      if (READ_TOOLS.has(toolName)) return false;
+      const sideEffect = toolResolver?.(toolName)?.sideEffect;
+      if (sideEffect === 'none' || READ_TOOLS.has(toolName)) return false;
       if (allowTodo && toolName === 'todo_write') return false;
       if (m === 'accept-edits' && (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'todo_write')) {
         return false;
       }
       return true;
     },
-    async approve(toolName, detail) {
+    async approve(toolName, detail, { signal = null } = {}) {
+      if (signal?.aborted) return false;
       if (m === 'yolo') return true;
-      if (READ_TOOLS.has(toolName)) return true;
+      const sideEffect = toolResolver?.(toolName)?.sideEffect;
+      if (sideEffect === 'none' || READ_TOOLS.has(toolName)) return true;
       if (allowTodo && toolName === 'todo_write') return true;
       if (m === 'accept-edits' && (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'todo_write')) {
         return true;
@@ -35,9 +42,28 @@ export function createPermissionGate(mode = 'ask', requestApproval = null, { int
         // unknown tools: ask unless yolo
         if (m === 'yolo') return true;
       }
-      return requestApproval ? requestApproval(toolName, detail) : askUser(toolName, detail, canPrompt);
+      const pending = requestApproval
+        ? requestApproval(toolName, detail, { signal })
+        : askUser(toolName, detail, canPrompt);
+      return await abortable(pending, signal);
     },
   };
+}
+
+async function abortable(value, signal) {
+  if (!signal) return value;
+  if (signal.aborted) return false;
+  return new Promise((resolve) => {
+    const onAbort = () => resolve(false);
+    signal.addEventListener('abort', onAbort, { once: true });
+    Promise.resolve(value).then((result) => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(result);
+    }, () => {
+      signal.removeEventListener('abort', onAbort);
+      resolve(false);
+    });
+  });
 }
 
 async function askUser(toolName, detail, interactive) {

@@ -321,4 +321,48 @@ CLI v1은 **기존 웹 API만** 사용한다. 이후 서비스에 추가하면 �
 
 ---
 
-*문서 버전: 2026-08-07 · 대상 제품: cheapai-cli*
+## 9. Runtime v2 구현 상태
+
+현재 실행 흐름은 다음과 같다.
+
+```text
+TUI / print
+  -> loop.js compatibility facade
+  -> AgentRuntime event + steering/follow-up queue
+  -> openai-compatible provider registry
+  -> AJV tool contract + permission gate
+  -> operation journal
+  -> workspace path policy / process-group runner
+  -> session v2 JSONL snapshot log
+```
+
+구현된 기반:
+
+- owner-only session v2 JSONL, legacy migration, malformed final-line recovery
+- PID/start identity 기반 per-session writer lease
+- side-effect operation replay/uncertain journal과 incomplete transcript reconciliation
+- monotonic runtime events, steering/follow-up queue, sequential/parallel tool policy
+- schema validation, middleware 재검증, token/time/turn budget
+- OpenAI-compatible provider registry, normalized errors, partial-output retry 차단
+- canonical workspace/workspace-plus/unrestricted file path policy
+- Unix process group/Windows process tree timeout과 abort, credential-stripped child env
+- command provenance, bounded skill context, explicitly approved local JS/TS extensions
+
+Project `.cheapai/config.json`은 model/temperature/compaction 같은 비보안 option만
+override할 수 있다. Provider endpoint, permission mode, path policy/extra roots와 extension
+approval은 owner-owned global config 전용이며 repository가 자체 권한을 상승시킬 수 없다.
+
+아직 제품 결정이 필요한 단계:
+
+- resident daemon/supervisor와 attach protocol
+- unattended schedule/durable goal/autonomous policy
+- Python kernel/RLM sandbox와 비용 귀속 정책
+- MCP credential/OAuth/transport 지원
+
+이 기능들은 현재 single-process CLI의 공개 동작에 자동으로 추가하지 않는다. 각각
+resident lifecycle, 보안 경계, credential 저장 정책이 확정된 뒤 별도 protocol version과
+acceptance test를 먼저 추가한다.
+
+---
+
+*문서 버전: 2026-08-10 · 대상 제품: cheapai-cli*

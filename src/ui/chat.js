@@ -23,6 +23,7 @@ import {
 } from '../llm/client.js';
 import {
   loadConfig,
+  loadScopedConfig,
   resolveModel,
   resolveBaseUrl,
   loadAuth,
@@ -32,6 +33,10 @@ import { whoami, logout, openBrowser } from '../auth.js';
 import { buildSystemPrompt } from '../prompts/system.js';
 import {
   createSession,
+  acquireSession,
+  bindSessionLease,
+  releaseSessionLease,
+  transferSessionLease,
   loadSession,
   findLatestSession,
   forkSession,
@@ -56,6 +61,7 @@ import {
 } from '../agent/usage.js';
 import { redoTurn, undoTurn } from '../agent/history.js';
 import { formatUpdateNotice } from '../update.js';
+import { loadExtensions } from '../resources/extensions.js';
 
 /**
  * Append-only interactive chat for a focused coding workspace.
@@ -68,9 +74,10 @@ export async function startChatTui({
   updateInfo = null,
 } = {}) {
   const startupUpdate = updateInfo || opts.updateInfo || null;
-  const cfg = loadConfig();
   const requestedCwd = path.resolve(opts.cwd || process.cwd());
+  const cfg = loadScopedConfig(requestedCwd);
   let session;
+  let sessionLease = null;
   if (opts.resume) {
     session = loadSession(opts.resume);
     if (!session) throw new Error(`세션 없음: ${opts.resume}`);
@@ -81,10 +88,16 @@ export async function startChatTui({
     throw new Error('--fork requires --continue or --resume with an existing session.');
   }
   if (session && opts.fork) session = forkSession(session, { title: opts.title });
+  if (session) {
+    sessionLease = acquireSession(session.id);
+    bindSessionLease(session, sessionLease);
+  }
+  try {
   const cwd = path.resolve(session?.cwd || requestedCwd);
   process.chdir(cwd);
   const customCommands = loadCustomCommands(cwd);
   const customAgents = loadCustomAgents(cwd);
+  let extensionRuntime = { extensions: [], tools: [], commands: [], hooks: new Map() };
 
   let model = session?.model && !opts.model ? session.model : resolveModel(opts.model, cfg);
   let agentName = opts.agent || session?.agent || 'build';
@@ -119,6 +132,8 @@ export async function startChatTui({
     session.goalMode = goalMode;
     session.agent = agentName;
     if (opts.title) session.title = String(opts.title).trim().slice(0, 80);
+    sessionLease = acquireSession(session.id);
+    bindSessionLease(session, sessionLease);
     saveSession(session);
   } else {
     session.cwd = cwd;
@@ -131,6 +146,13 @@ export async function startChatTui({
     }
     saveSession(session);
   }
+
+  extensionRuntime = await loadExtensions({
+    cwd,
+    session,
+    approvedPaths: Array.isArray(cfg.approvedExtensions) ? cfg.approvedExtensions : [],
+  });
+  customCommands.push(...extensionRuntime.commands.filter((command) => command?.name && command?.template));
 
   const fullscreen = !print && input.isTTY && output.isTTY;
   const ui = fullscreen ? createFullscreenChatUi({
@@ -274,6 +296,10 @@ export async function startChatTui({
         },
         requestPermission: ui.requestPermission || null,
         ui: print ? null : ui.agentHooks(),
+        customTools: extensionRuntime.tools,
+        eventHooks: extensionRuntime.hooks,
+        pathMode: permissionMode === 'yolo' ? 'unrestricted' : cfg.pathMode || 'workspace',
+        extraRoots: Array.isArray(cfg.extraRoots) ? cfg.extraRoots : [],
       });
       if (!print && result.usage) {
         ui.writeUsage(result.usage, session.usage, contextWindow, session.lastContextTokens);
@@ -385,7 +411,15 @@ export async function startChatTui({
 
   function createSlashContext() {
     function activateSession(next, notice) {
+      const nextLease = next.id === session.id ? sessionLease : acquireSession(next.id);
+      const previousSession = session;
+      if (next !== previousSession) {
+        if (next.id === previousSession.id) transferSessionLease(previousSession, next);
+        else bindSessionLease(next, nextLease);
+      }
       session = next;
+      sessionLease = nextLease;
+      if (previousSession !== next && previousSession.id !== next.id) releaseSessionLease(previousSession);
       model = next.model || model;
       agentName = next.agent || 'build';
       goalMode = !!next.goalMode;
@@ -512,11 +546,17 @@ export async function startChatTui({
       },
       recreateSession() {
         goalMode = false;
-        session = createSession({
+        const next = createSession({
           cwd,
           model,
           systemPrompt: buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() }),
         });
+        const nextLease = acquireSession(next.id);
+        const previousSession = session;
+        bindSessionLease(next, nextLease);
+        session = next;
+        sessionLease = nextLease;
+        releaseSessionLease(previousSession);
         session.goalMode = false;
         session.agent = agentName;
         contextWindow = null;
@@ -604,6 +644,10 @@ export async function startChatTui({
         return runOnce(text);
       },
     };
+  }
+  } finally {
+    if (session) releaseSessionLease(session);
+    else sessionLease?.release();
   }
 }
 
