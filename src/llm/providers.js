@@ -1,4 +1,9 @@
-import { classifyProviderError, isRetryableProviderError } from './errors.js';
+import {
+  classifyProviderError,
+  isRetryableProviderError,
+  providerRetryDelayMs,
+  DEFAULT_PROVIDER_MAX_RETRIES,
+} from './errors.js';
 
 const providers = new Map();
 
@@ -26,7 +31,19 @@ export function listProviders() {
 export function createOpenAICompatibleProvider() {
   return {
     id: 'openai-compatible',
-    async stream({ client, model, messages, tools, temperature = 0.2, reasoningEffort = null, signal = null, onDelta, onThinking, maxRetries = 1 }) {
+    async stream({
+      client,
+      model,
+      messages,
+      tools,
+      temperature = 0.2,
+      reasoningEffort = null,
+      signal = null,
+      onDelta,
+      onThinking,
+      onRetry = null,
+      maxRetries = DEFAULT_PROVIDER_MAX_RETRIES,
+    }) {
       const body = {
         model,
         messages,
@@ -42,6 +59,7 @@ export function createOpenAICompatibleProvider() {
       }
 
       let reasoningFallback = false;
+      const retryBudget = Math.max(0, Number(maxRetries) || 0);
       for (let attempt = 0; ; attempt++) {
         try {
           return await consumeStream({
@@ -52,6 +70,8 @@ export function createOpenAICompatibleProvider() {
             onThinking,
           });
         } catch (error) {
+          // Visible assistant text or tool-call fragments cannot be safely replayed
+          // without duplicating UI/session output. Thinking-only prefixes remain retryable.
           if (error.partialOutput) throw error;
           if (!reasoningFallback && hasReasoningFields(body) && /reasoning|effort|unknown|unrecognized/i.test(String(error?.message || error))) {
             delete body.reasoning_effort;
@@ -59,9 +79,17 @@ export function createOpenAICompatibleProvider() {
             reasoningFallback = true;
             continue;
           }
-          if (attempt >= Math.max(0, Number(maxRetries) || 0) || !isRetryableProviderError(error)) throw error;
+          if (attempt >= retryBudget || !isRetryableProviderError(error)) throw error;
           const classification = classifyProviderError(error);
-          if (classification.retryAfterMs) await delay(classification.retryAfterMs, signal);
+          const waitMs = providerRetryDelayMs(attempt, { retryAfterMs: classification.retryAfterMs });
+          onRetry?.({
+            attempt: attempt + 1,
+            maxRetries: retryBudget,
+            waitMs,
+            classification,
+            error,
+          });
+          if (waitMs > 0) await delay(waitMs, signal);
         }
       }
     },
@@ -142,7 +170,9 @@ async function consumeStream({ client, body, signal, onDelta, onThinking }) {
       }
     }
   } catch (error) {
-    error.partialOutput = Boolean(content || thinking || toolMap.size);
+    // Only assistant content / tool fragments make a stream non-replayable.
+    // Reasoning-only partials are safe to discard and retry.
+    error.partialOutput = Boolean(content || toolMap.size);
     throw error;
   }
 

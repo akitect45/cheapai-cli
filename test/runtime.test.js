@@ -69,7 +69,7 @@ test('steering enters after a tool batch and follow-up waits for idle', async ()
               id: 'bash-call',
               function: {
                 name: 'bash',
-                arguments: JSON.stringify({ command: `${JSON.stringify(process.execPath)} -e "setTimeout(()=>{},80)"` }),
+                arguments: JSON.stringify({ command: `"${process.execPath}" -e "setTimeout(()=>{},80)"` }),
               },
             }],
           },
@@ -98,22 +98,103 @@ test('steering enters after a tool batch and follow-up waits for idle', async ()
   assert.equal(events.some((event) => event.type === 'tool_end'), true);
 }));
 
+test('queued follow-ups can be promoted into mid-run steering', async () => withHome(async (root) => {
+  const requestMessages = [];
+  let requests = 0;
+  const client = fakeClient(async (body) => {
+    requests++;
+    requestMessages.push(structuredClone(body.messages));
+    if (requests === 1) {
+      return chunks([{
+        choices: [{
+          finish_reason: 'tool_calls',
+          delta: {
+            tool_calls: [{
+              index: 0,
+              id: 'bash-call',
+              function: {
+                name: 'bash',
+                arguments: JSON.stringify({ command: `"${process.execPath}" -e "setTimeout(()=>{},120)"` }),
+              },
+            }],
+          },
+        }],
+      }]);
+    }
+    return chunks([{ choices: [{ finish_reason: 'stop', delta: { content: requests === 2 ? 'steered' : 'later' } }] }]);
+  });
+  const session = createSession({ cwd: root, model: 'test', systemPrompt: 'system' });
+  const runtime = createAgentRuntime({ client, model: 'test', session, permissionMode: 'yolo', print: true, ui: silentUi() });
+  const running = runtime.run('start');
+  setTimeout(() => {
+    assert.equal(runtime.enqueueFollowUp('queued later'), true);
+    assert.deepEqual(runtime.queueSnapshot().followUps, ['queued later']);
+    assert.equal(runtime.promoteFollowUpsToSteering(), 1);
+    assert.deepEqual(runtime.queueSnapshot(), { followUps: [], steering: ['queued later'] });
+  }, 20);
+  const result = await running;
+
+  assert.equal(requests, 2);
+  assert.equal(hasUserText(requestMessages[1], 'queued later'), true);
+  assert.equal(result.text, 'steered');
+}));
+
+test('multimodal user content is preserved in the session and provider request', async () => withHome(async (root) => {
+  let requestMessages = null;
+  const client = fakeClient(async (body) => {
+    requestMessages = structuredClone(body.messages);
+    return chunks([{ choices: [{ finish_reason: 'stop', delta: { content: 'image received' } }] }]);
+  });
+  const session = createSession({ cwd: root, model: 'test', systemPrompt: 'system' });
+  const runtime = createAgentRuntime({ client, model: 'test', session, permissionMode: 'yolo', print: true, ui: silentUi() });
+  const content = [
+    { type: 'text', text: 'describe this image' },
+    { type: 'image_url', image_url: { url: 'data:image/png;base64,iVBORw0KGgo=' } },
+  ];
+  await runtime.run(content);
+
+  assert.deepEqual(session.messages.find((message) => message.role === 'user').content, content);
+  assert.deepEqual(requestMessages.find((message) => message.role === 'user').content, content);
+  assert.equal(session.title, 'describe this image');
+}));
+
 test('sequential tool contracts are barriers while parallel tools retain source order', async () => withHome(async (root) => {
   let requests = 0;
+  const batches = [];
+  const starts = [];
+  const ends = [];
   const client = fakeClient(async () => {
     requests++;
     if (requests === 1) {
       return chunks([{ choices: [{ finish_reason: 'tool_calls', delta: { tool_calls: [
-        { index: 0, id: 'first', function: { name: 'bash', arguments: JSON.stringify({ command: `${JSON.stringify(process.execPath)} -e "setTimeout(()=>require('fs').writeFileSync('order','1'),150)"`, timeout_ms: 1000 }) } },
-        { index: 1, id: 'second', function: { name: 'bash', arguments: JSON.stringify({ command: `${JSON.stringify(process.execPath)} -e "require('fs').appendFileSync('order','2')"`, timeout_ms: 1000 }) } },
+        { index: 0, id: 'first', function: { name: 'bash', arguments: JSON.stringify({ command: `"${process.execPath}" -e "setTimeout(()=>require('fs').writeFileSync('order','1'),150)"`, timeout_ms: 1000 }) } },
+        { index: 1, id: 'second', function: { name: 'bash', arguments: JSON.stringify({ command: `"${process.execPath}" -e "require('fs').appendFileSync('order','2')"`, timeout_ms: 1000 }) } },
       ] } }] }]);
     }
     return chunks([{ choices: [{ finish_reason: 'stop', delta: { content: 'done' } }] }]);
   });
   const session = createSession({ cwd: root, model: 'test', systemPrompt: 'system' });
-  const runtime = createAgentRuntime({ client, model: 'test', session, permissionMode: 'yolo', print: true, ui: silentUi() });
+  const runtime = createAgentRuntime({
+    client,
+    model: 'test',
+    session,
+    permissionMode: 'yolo',
+    print: true,
+    ui: {
+      ...silentUi(),
+      onToolBatch(items, meta) { batches.push({ items, meta }); },
+      onToolStart(_name, _detail, meta) { starts.push(meta); },
+      onToolEnd(_name, _detail, _status, _result, meta) { ends.push(meta); },
+    },
+  });
   await runtime.run('order the commands');
   assert.equal(fs.readFileSync(path.join(root, 'order'), 'utf8'), '12');
+  assert.equal(batches.length, 1);
+  assert.equal(batches[0].meta.batchCount, 2);
+  assert.deepEqual(batches[0].items.map((item) => item.callId), ['first', 'second']);
+  assert.equal(new Set(batches[0].items.map((item) => item.batchId)).size, 1);
+  assert.deepEqual(starts.map((meta) => meta.callId), ['first', 'second']);
+  assert.deepEqual(ends.map((meta) => meta.callId), ['first', 'second']);
 }));
 
 test('uncertain operations are reconciled before a new provider request', async () => withHome(async (root) => {

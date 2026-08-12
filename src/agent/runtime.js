@@ -1,5 +1,11 @@
 import crypto from 'node:crypto';
 import { chatWithTools } from '../llm/client.js';
+import {
+  classifyProviderError,
+  isRetryableProviderError,
+  providerRetryDelayMs,
+  DEFAULT_PROVIDER_MAX_RETRIES,
+} from '../llm/errors.js';
 import { createPermissionGate } from './permissions.js';
 import { beginTurn, finishTurn, recordBash, recordFileChange } from './history.js';
 import { saveSession, appendSessionEntry } from './session.js';
@@ -17,7 +23,7 @@ export function createAgentRuntime(options = {}) {
     model,
     session,
     permissionMode = 'ask',
-    maxTurns = 40,
+    maxTurns = 0,
     temperature = 0.2,
     reasoningEffort = null,
     showThinking = true,
@@ -31,7 +37,7 @@ export function createAgentRuntime(options = {}) {
     pathMode = alwaysApprove || permissionMode === 'yolo' ? 'unrestricted' : 'workspace',
     extraRoots = [],
     middleware = {},
-    maxRetries = 1,
+    maxRetries = DEFAULT_PROVIDER_MAX_RETRIES,
     maxTokens = 0,
     timeBudgetMs = 0,
     customTools = [],
@@ -65,13 +71,25 @@ export function createAgentRuntime(options = {}) {
     },
     enqueueSteering(text) {
       if (text == null || !String(text).trim()) return false;
-      steeringQueue.push(String(text));
+      steeringQueue.push(String(text).trim());
       return true;
     },
     enqueueFollowUp(text) {
       if (text == null || !String(text).trim()) return false;
-      followUpQueue.push(String(text));
+      followUpQueue.push(String(text).trim());
       return true;
+    },
+    /** Move waiting follow-ups into the mid-run steering queue (inject after the current tool batch / reply). */
+    promoteFollowUpsToSteering() {
+      const items = followUpQueue.splice(0);
+      for (const item of items) steeringQueue.push(item);
+      return items.length;
+    },
+    queueSnapshot() {
+      return {
+        followUps: [...followUpQueue],
+        steering: [...steeringQueue],
+      };
     },
     abort() {
       controller?.abort();
@@ -127,11 +145,15 @@ export function createAgentRuntime(options = {}) {
       let completed = false;
       emit('agent_start', { model: session.model || model });
       try {
-        session.messages.push({ role: 'user', content: String(userText || '') });
-        if (!session.title) session.title = sessionTitle(userText);
+        const content = Array.isArray(userText) ? userText : String(userText || '');
+        const titleText = Array.isArray(content) ? content.map((part) => part?.text || '').join(' ') : content;
+        session.messages.push({ role: 'user', content });
+        if (!session.title) session.title = sessionTitle(titleText);
         saveSession(session);
 
-        for (let turn = 1; turn <= maxTurns; turn++) {
+        // maxTurns <= 0 means unlimited tool loops.
+        const turnLimit = Number(maxTurns) > 0 ? Number(maxTurns) : Number.POSITIVE_INFINITY;
+        for (let turn = 1; turn <= turnLimit; turn++) {
           if (runSignal.aborted) throw abortError();
           const turnId = turn === 1 ? checkpoint.id : crypto.randomUUID();
           currentTurnId = turnId;
@@ -141,7 +163,7 @@ export function createAgentRuntime(options = {}) {
 
           let startedAssistant = false;
           let renderedAssistant = false;
-          const result = await chatWithTools({
+          const stream = await streamTurnWithRetries({
             client,
             model: session.model || model,
             messages: session.messages,
@@ -150,26 +172,15 @@ export function createAgentRuntime(options = {}) {
             reasoningEffort,
             signal: runSignal,
             maxRetries,
-            onThinking: (delta) => {
-              emit('reasoning_delta', { delta }, { turnId });
-              if (showThinking) {
-                if (ui?.onReasoningDelta) ui.onReasoningDelta(delta);
-                else if (!print) process.stdout.write(`\x1b[2m${delta}\x1b[0m`);
-              }
-            },
-            onDelta: (delta) => {
-              if (!startedAssistant) {
-                startedAssistant = true;
-                renderedAssistant = true;
-                emit('message_start', { role: 'assistant' }, { turnId });
-                ui?.onAssistantStart?.();
-              }
-              emit('message_delta', { delta }, { turnId });
-              if (ui?.onDelta) ui.onDelta(delta);
-              else if (print) process.stdout.write(delta);
-              else process.stdout.write(delta);
-            },
+            print,
+            ui,
+            emit,
+            turnId,
+            showThinking,
           });
+          const result = stream.result;
+          startedAssistant = stream.startedAssistant;
+          renderedAssistant = stream.renderedAssistant;
 
           if (result.usage) {
             const usage = normalizeUsage(result.usage);
@@ -341,7 +352,7 @@ async function executeToolBatch({
 }) {
   const prepared = [];
   let permitAll = alwaysApprove;
-  for (const call of calls) {
+  for (const [callIndex, call] of calls.entries()) {
     const name = call.function?.name;
     const parsed = parseToolArguments(runtime.registry, name, call.function?.arguments);
     let args = parsed.ok ? parsed.args : null;
@@ -363,9 +374,15 @@ async function executeToolBatch({
       }
     }
     const detail = runtime.detailFor(name, args || {});
+    const meta = {
+      callId: call.id || `${turnId}:${callIndex}`,
+      batchId: turnId,
+      batchCount: calls.length,
+      batchIndex: callIndex,
+    };
     emitEvent('tool_preflight', { name, detail, error }, { turnId });
     if (!error && !permitAll && gate.requiresApproval(name)) {
-      if (ui?.onToolPending) ui.onToolPending(name, detail);
+      if (ui?.onToolPending) ui.onToolPending(name, detail, meta);
       else if (!print) console.log(`\x1b[33m\n○ ${name} · approval required\x1b[0m \x1b[2m${String(detail).slice(0, 120)}\x1b[0m`);
       const decision = await gate.approve(name, detail, { signal: runSignal });
       if (decision === 'always') {
@@ -375,8 +392,13 @@ async function executeToolBatch({
         error = { code: 'permission_denied', message: 'User denied this tool call.' };
       }
     }
-    prepared.push({ call, name, args, tool, error, detail });
+    prepared.push({ call, name, args, tool, error, detail, meta });
   }
+
+  ui?.onToolBatch?.(prepared.map(({ name, detail, meta }) => ({ name, detail, ...meta })), {
+    batchId: turnId,
+    batchCount: prepared.length,
+  });
 
   const results = [];
   for (let index = 0; index < prepared.length;) {
@@ -395,11 +417,11 @@ async function executeToolBatch({
   return results;
 
   async function executeOne(item) {
-    const { call, name, args, tool, error, detail } = item;
+    const { call, name, args, tool, error, detail, meta } = item;
     if (runSignal.aborted) throw abortError();
     if (error) {
       const result = { error: error.message, code: error.code };
-      ui?.onToolEnd?.(name, detail, 'error', result);
+      ui?.onToolEnd?.(name, detail, 'error', result, meta);
       return { call, result, status: 'error' };
     }
     const operationId = `${turnId}:${call.id}`;
@@ -408,11 +430,11 @@ async function executeToolBatch({
       : journal.begin({ operationId, tool: name, args });
     if (!operation.execute) {
       const result = operation.result || { error: 'Operation was uncertain and was not replayed.', code: operation.record?.state };
-      ui?.onToolEnd?.(name, detail, operation.record?.state === 'completed' ? 'ok' : 'error', result);
+      ui?.onToolEnd?.(name, detail, operation.record?.state === 'completed' ? 'ok' : 'error', result, meta);
       return { call, result, status: operation.record?.state === 'completed' ? 'ok' : 'error' };
     }
     emitEvent('tool_start', { name, detail }, { turnId });
-    ui?.onToolStart?.(name, detail);
+    ui?.onToolStart?.(name, detail, meta);
     if (!ui?.onToolStart && !print) console.log(`\x1b[33m\n● ${name} · running\x1b[0m`);
     let result;
     let status = 'ok';
@@ -438,7 +460,7 @@ async function executeToolBatch({
       if (tool.sideEffect !== 'none') journal.fail(operationId, result);
     }
     emitEvent('tool_end', { name, detail, status, result }, { turnId });
-    ui?.onToolEnd?.(name, detail, status, result);
+    ui?.onToolEnd?.(name, detail, status, result, meta);
     if (!ui?.onToolEnd && !print) {
       const mark = status === 'ok' ? '\x1b[32m  ✓ done\x1b[0m' : '\x1b[33m  · done\x1b[0m';
       console.log(mark);
@@ -493,6 +515,105 @@ function reconcileUncertainOperations(session, records) {
   }
   if (changed) session.messages = rebuilt;
   return changed;
+}
+
+/**
+ * Provider-level retries cover pre-stream / clean failures.
+ * Mid-stream disconnects after visible text set partialOutput and need a turn-level
+ * replay that clears the incomplete assistant bubble first.
+ */
+async function streamTurnWithRetries({
+  client,
+  model,
+  messages,
+  tools,
+  temperature,
+  reasoningEffort,
+  signal,
+  maxRetries,
+  print,
+  ui,
+  emit,
+  turnId,
+  showThinking,
+}) {
+  const retryBudget = Math.max(0, Number(maxRetries) || 0);
+  for (let attempt = 0; ; attempt++) {
+    let startedAssistant = false;
+    let renderedAssistant = false;
+    try {
+      const result = await chatWithTools({
+        client,
+        model,
+        messages,
+        tools,
+        temperature,
+        reasoningEffort,
+        signal,
+        maxRetries,
+        onRetry: ({ attempt: providerAttempt, maxRetries: budget, waitMs, classification }) => {
+          const seconds = Math.max(1, Math.ceil((waitMs || 0) / 1000));
+          const kind = classification?.category === 'rate_limit'
+            ? 'rate limited'
+            : classification?.category || 'error';
+          const text = `Provider ${kind} — retry ${providerAttempt}/${budget} in ${seconds}s…`;
+          ui?.onNotice?.(text, 'warning');
+          if (!ui?.onNotice && !print) console.log(`\x1b[33m  ${text}\x1b[0m`);
+        },
+        onThinking: (delta) => {
+          emit('reasoning_delta', { delta }, { turnId });
+          if (showThinking) {
+            if (ui?.onReasoningDelta) ui.onReasoningDelta(delta);
+            else if (!print) process.stdout.write(`\x1b[2m${delta}\x1b[0m`);
+          }
+        },
+        onDelta: (delta) => {
+          if (!startedAssistant) {
+            startedAssistant = true;
+            renderedAssistant = true;
+            emit('message_start', { role: 'assistant' }, { turnId });
+            ui?.onAssistantStart?.();
+          }
+          emit('message_delta', { delta }, { turnId });
+          if (ui?.onDelta) ui.onDelta(delta);
+          else process.stdout.write(delta);
+        },
+      });
+      return { result, startedAssistant, renderedAssistant };
+    } catch (error) {
+      if (signal?.aborted || error?.name === 'AbortError') throw error;
+      // Non-partial failures are already retried inside the provider stream().
+      if (!error?.partialOutput || !isRetryableProviderError(error) || attempt >= retryBudget) throw error;
+
+      if (renderedAssistant) ui?.onAssistantRetry?.();
+      const classification = classifyProviderError(error);
+      const waitMs = providerRetryDelayMs(attempt, { retryAfterMs: classification.retryAfterMs });
+      const seconds = Math.max(1, Math.ceil(waitMs / 1000));
+      const text = `Stream interrupted — retrying (${attempt + 1}/${retryBudget}) in ${seconds}s…`;
+      ui?.onNotice?.(text, 'warning');
+      if (!ui?.onNotice && !print) console.log(`\x1b[33m  ${text}\x1b[0m`);
+      if (waitMs > 0) await delayWithSignal(waitMs, signal);
+    }
+  }
+}
+
+function delayWithSignal(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const cleanup = () => signal?.removeEventListener('abort', onAbort);
+    const timer = setTimeout(() => {
+      cleanup();
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      cleanup();
+      const error = new Error('The operation was aborted.');
+      error.name = 'AbortError';
+      reject(error);
+    };
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) onAbort();
+  });
 }
 
 function linkedAbortController(parent) {

@@ -51,9 +51,15 @@ console.log('cheapai e2e\n');
   else ok(`tool definitions (${TOOL_DEFINITIONS.length})`);
 
   const windowsShell = shellInvocation('dir', 'win32', { ComSpec: 'C:\\Windows\\System32\\cmd.exe' });
+  const quotedWindowsShell = shellInvocation('"C:\\Program Files\\nodejs\\node.exe" --version', 'win32', { ComSpec: 'cmd.exe' });
   const macShell = shellInvocation('pwd', 'darwin', { SHELL: '/bin/zsh' });
-  if (windowsShell[0] !== 'C:\\Windows\\System32\\cmd.exe' || windowsShell[1][0] !== '/c' || macShell[0] !== 'bash' || macShell[1][0] !== '-lc') {
-    bad('platform shell selection', new Error(JSON.stringify({ windowsShell, macShell })));
+  if (windowsShell[0] !== 'C:\\Windows\\System32\\cmd.exe'
+    || windowsShell[1].slice(0, 3).join(' ') !== '/d /s /c'
+    || String(windowsShell[1][3] || '') !== 'chcp 65001>nul 2>&1 & dir'
+    || String(quotedWindowsShell[1].at(-1) || '') !== 'chcp 65001>nul 2>&1 & "C:\\Program Files\\nodejs\\node.exe" --version'
+    || macShell[0] !== 'bash'
+    || macShell[1][0] !== '-lc') {
+    bad('platform shell selection', new Error(JSON.stringify({ windowsShell, quotedWindowsShell, macShell })));
   } else ok('platform shell selection');
 
   const tmp = path.join(os.tmpdir(), `cheapai-e2e-${Date.now()}`);
@@ -290,11 +296,23 @@ console.log('cheapai e2e\n');
 
 // 4) terminal rendering primitives
 {
-  const { displayWidth, panel, statusBar, stripAnsi, wrapAnsi } = await import('../src/ui/draw.js');
+  const { displayWidth, formatMarkdown, formatTabTitle, panel, statusBar, stripAnsi, wrapAnsi } = await import('../src/ui/draw.js');
   const wrapped = wrapAnsi('abcdefghij', 4);
   if (wrapped.join('') !== 'abcdefghij' || wrapped.some((line) => displayWidth(line) > 4)) {
     bad('terminal wrapping', new Error(JSON.stringify(wrapped)));
   } else ok('terminal wrapping');
+
+  const md = formatMarkdown('say **hello** and `**code**`');
+  if (stripAnsi(md) !== 'say hello and `**code**`' || md.includes('**hello**')) {
+    bad('markdown bold rendering', new Error(md));
+  } else ok('markdown bold rendering');
+
+  const idleTitle = formatTabTitle({ busy: false, sessionLabel: 'demo' });
+  const busyTitle = formatTabTitle({ busy: true, thinking: true, sessionLabel: 'demo', frame: 0 });
+  const blinkTitle = formatTabTitle({ busy: true, thinking: true, sessionLabel: 'demo', frame: 4 });
+  if (idleTitle !== 'cheapai · demo' || busyTitle !== '● thinking... demo' || blinkTitle !== '○ thinking... demo') {
+    bad('terminal tab title', new Error(JSON.stringify({ idleTitle, busyTitle, blinkTitle })));
+  } else ok('terminal tab title');
 
   if (displayWidth('한글') !== 4) bad('terminal CJK width', new Error('unexpected width'));
   else ok('terminal CJK width');
@@ -645,7 +663,7 @@ console.log('cheapai e2e\n');
   thinkingUi.writeUser('thinking test');
   thinkingUi.agentHooks().onThinking(1);
   const thinkingFrame = thinkingUi.renderSnapshot(80, 24);
-  if (!thinkingFrame.includes('Thinking · turn 1') || !thinkingFrame.includes('●')) {
+  if (!/thinking\s*·\s*turn 1/i.test(thinkingFrame) || !thinkingFrame.includes('●')) {
     bad('thinking indicator', new Error('blinking indicator missing'));
   } else ok('thinking indicator');
 

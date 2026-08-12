@@ -21,6 +21,7 @@ export async function selectMenu({
   footer = '↑/↓  move   Enter  select   1-9  shortcut   q  quit',
   initialIndex = 0,
   searchable = false,
+  hotkeys = null,
 } = {}) {
   if (!options?.length) return null;
 
@@ -192,6 +193,18 @@ export async function selectMenu({
           index = 0;
           paint();
           continue;
+        }
+        if (hotkeys && Object.prototype.hasOwnProperty.call(hotkeys, ch) && !query) {
+          const filtered = visibleOptions();
+          if (filtered.length) {
+            const selected = filtered[index];
+            done({
+              hotkey: hotkeys[ch],
+              option: selected,
+              action: selected.action ?? selected,
+            });
+          }
+          return;
         }
         if (ch === 'j') {
           if (searchable) {

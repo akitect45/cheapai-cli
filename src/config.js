@@ -79,7 +79,7 @@ export function loadConfig() {
     webOrigin: DEFAULT_WEB_ORIGIN,
     model: DEFAULT_MODEL,
     permissionMode: 'ask',
-    maxTurns: 40,
+    maxTurns: 0,
     temperature: 0.2,
     reasoningEffort: 'off',
     showThinking: true,

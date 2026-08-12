@@ -6,7 +6,7 @@ const graphemeSegmenter = typeof Intl.Segmenter === 'function'
 const extendedPictographic = /\p{Extended_Pictographic}/u;
 
 export function termWidth() {
-  return Math.max(20, Math.min(process.stdout.columns || 80, 110));
+  return Math.max(20, process.stdout.columns || 80);
 }
 
 export function clearScreen() {
@@ -20,8 +20,22 @@ export function hr(char = '─') {
   return t.border(char.repeat(w));
 }
 
+/**
+ * Full-width rule with a centered label, e.g.
+ * ──────── compacting now... ────────
+ */
+export function statusBanner(label, width = termWidth(), paint = (s) => t.dim(s)) {
+  const text = ` ${String(label || '').trim()} `;
+  const w = Math.max(8, Number(width) || termWidth());
+  const textWidth = displayWidth(text);
+  if (textWidth >= w) return paint(`${'─'.repeat(Math.max(1, w - 1))}…`);
+  const left = Math.floor((w - textWidth) / 2);
+  const right = Math.max(0, w - left - textWidth);
+  return paint(`${'─'.repeat(left)}${text}${'─'.repeat(right)}`);
+}
+
 export function box(lines, { title, width } = {}) {
-  const w = width || Math.min(termWidth() - 2, 72);
+  const w = width || Math.max(18, termWidth() - 2);
   const top = title
     ? `╭─ ${title} ${'─'.repeat(Math.max(0, w - title.length - 4))}╮`
     : `╭${'─'.repeat(w)}╮`;
@@ -38,7 +52,7 @@ export function box(lines, { title, width } = {}) {
 
 /** Simpler box without broken ANSI padding */
 export function panel(title, bodyLines) {
-  const w = Math.max(18, Math.min(termWidth() - 2, 82));
+  const w = Math.max(18, termWidth() - 2);
   const out = [];
   out.push(t.border(`╭${'─'.repeat(w - 2)}╮`));
   if (title) {
@@ -76,6 +90,82 @@ export function displayWidth(value) {
   return width;
 }
 
+/** Iterate grapheme clusters (falls back to code points). */
+export function iterateGraphemes(value) {
+  const text = String(value || '');
+  if (graphemeSegmenter) {
+    return [...graphemeSegmenter.segment(text)].map(({ segment }) => segment);
+  }
+  return [...text];
+}
+
+/**
+ * Slice plain text by display-cell columns [startCell, endCell).
+ * Wide glyphs are included wholly when any of their cells overlap the range.
+ */
+export function sliceByCells(value, startCell, endCell) {
+  const plain = stripAnsi(String(value || ''));
+  const start = Math.max(0, Number(startCell) || 0);
+  const end = endCell == null || !Number.isFinite(Number(endCell))
+    ? Number.POSITIVE_INFINITY
+    : Math.max(0, Number(endCell));
+  if (end <= start) return '';
+  let cells = 0;
+  let out = '';
+  for (const segment of iterateGraphemes(plain)) {
+    const w = displayWidth(segment);
+    const next = cells + w;
+    if (next > start && cells < end) out += segment;
+    cells = next;
+    if (cells >= end) break;
+  }
+  return out;
+}
+
+/**
+ * Paint inverse video on display-cell columns [startCell, endCell) of a (possibly ANSI-styled) line.
+ * Uses SGR 7/27 so surrounding styles are preserved better than a full reset.
+ */
+export function paintInverseCells(line, startCell, endCell) {
+  const source = String(line || '');
+  const start = Math.max(0, Number(startCell) || 0);
+  const end = endCell == null || !Number.isFinite(Number(endCell))
+    ? Number.POSITIVE_INFINITY
+    : Math.max(0, Number(endCell));
+  if (!(end > start) || !source) return source;
+
+  const tokens = source.match(/\x1b\[[0-?]*[ -/]*[@-~]|[^\x1b]+/g) || [];
+  let cells = 0;
+  let out = '';
+  let inverseOn = false;
+
+  const setInverse = (on) => {
+    if (on === inverseOn) return;
+    out += on ? '\x1b[7m' : '\x1b[27m';
+    inverseOn = on;
+  };
+
+  for (const token of tokens) {
+    if (token.startsWith('\x1b[')) {
+      out += token;
+      // After a full reset, re-assert inverse if we are still inside the range.
+      if (token === '\x1b[0m' || token === '\x1b[m') {
+        if (inverseOn) out += '\x1b[7m';
+      }
+      continue;
+    }
+    for (const segment of iterateGraphemes(token)) {
+      const w = displayWidth(segment);
+      const overlaps = cells + w > start && cells < end;
+      setInverse(overlaps);
+      out += segment;
+      cells += w;
+    }
+  }
+  setInverse(false);
+  return out;
+}
+
 function graphemeWidth(segment) {
   const codePoints = [...segment].filter((char) => {
     const code = char.codePointAt(0);
@@ -104,6 +194,93 @@ export function sanitizeTerminalText(value) {
     .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+}
+
+/**
+ * Terminal tab / window title for the chat workspace.
+ * Busy states blink ● / ○ via the frame counter.
+ */
+export function formatTabTitle({ busy = false, thinking = false, sessionLabel = '', frame = 0 } = {}) {
+  const session = String(sessionLabel || 'session').replace(/\s+/g, ' ').trim().slice(0, 48) || 'session';
+  if (!busy) return `cheapai · ${session}`;
+  const pulse = Math.floor(Number(frame) / 4) % 2 === 0 ? '●' : '○';
+  const phase = thinking ? 'thinking...' : 'working...';
+  return `${pulse} ${phase} ${session}`;
+}
+
+/** OSC 0 title — works in Windows Terminal, modern PowerShell, iTerm, etc. */
+export function writeTerminalTitle(title) {
+  if (!process.stdout.isTTY || process.env.TERM === 'dumb') return;
+  const safe = String(title ?? '')
+    .replace(/[\x00-\x1f\x7f]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .slice(0, 120);
+  process.stdout.write(`\x1b]0;${safe}\x07`);
+  try {
+    process.title = safe || 'cheapai';
+  } catch {
+    /* ignore */
+  }
+}
+
+/**
+ * Lightweight markdown → terminal text for chat messages.
+ * Renders **bold** (and protected `code` / ``` fences). Markers are removed
+ * even when color is disabled so chat never shows raw ** markers.
+ */
+export function formatMarkdown(text) {
+  const source = String(text ?? '');
+  if (!source) return '';
+  const color = process.stdout.isTTY === true && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
+  const boldOpen = color ? '\x1b[1m' : '';
+  const boldClose = color ? '\x1b[22m' : '';
+  const codeOpen = color ? '\x1b[2m' : '';
+  const codeClose = color ? '\x1b[22m' : '';
+
+  let out = '';
+  let index = 0;
+  let inFence = false;
+
+  while (index < source.length) {
+    if (source.startsWith('```', index)) {
+      inFence = !inFence;
+      out += '```';
+      index += 3;
+      continue;
+    }
+    if (inFence) {
+      out += source[index++];
+      continue;
+    }
+
+    if (source[index] === '`') {
+      const end = source.indexOf('`', index + 1);
+      if (end !== -1 && !source.slice(index + 1, end).includes('\n')) {
+        const inner = source.slice(index + 1, end);
+        out += `\`${codeOpen}${inner}${codeClose}\``;
+        index = end + 1;
+        continue;
+      }
+    }
+
+    if (source.startsWith('**', index)) {
+      const end = source.indexOf('**', index + 2);
+      if (end !== -1) {
+        const inner = source.slice(index + 2, end);
+        // Single-line emphasis only — avoids eating list bullets / unfinished stream spans.
+        if (inner.length > 0 && !inner.includes('\n') && !inner.includes('`')) {
+          out += `${boldOpen}${inner}${boldClose}`;
+          index = end + 2;
+          continue;
+        }
+      }
+    }
+
+    out += source[index++];
+  }
+
+  return out;
 }
 
 export function wrapAnsi(value, width) {
@@ -204,33 +381,64 @@ export function toolCard(name, detail, status, result, showDetails = false) {
           : status === 'error'
             ? t.red('error')
             : t.dim(status || '');
-  const width = Math.max(12, Math.min(termWidth() - 9, 82));
+  const width = Math.max(12, termWidth() - 9);
   const detailText = String(detail || '').replace(/\s+/g, ' ').trim();
   const marker = status === 'awaiting' ? t.yellow('○') : status === 'running' ? t.yellow('●') : status === 'ok' ? t.green('✓') : t.red('✗');
   const label = toolLabel(name);
   const complete = status === 'ok' || status === 'denied' || status === 'error';
   const preview = result ? resultPreview(name, result) : '';
   const summary = preview || detailText;
+  const diff = result?.diff;
+  let statsText = '';
+  if (diff && (diff.additions || diff.deletions)) {
+    const bits = [];
+    if (diff.additions) bits.push(t.green(`+${diff.additions}`));
+    if (diff.deletions) bits.push(t.red(`-${diff.deletions}`));
+    statsText = `  ${bits.join(' ')}`;
+  }
   let heading = `  ${t.border(complete ? '╰─' : '├─')} ${marker} ${t.tool(label)}${st ? `  ${st}` : ''}`;
-  if (complete && summary && !showDetails && status === 'ok') {
-    heading += `  ${t.dim(wrapAnsi(summary, Math.max(8, width - 18))[0])}`;
+  if (complete && summary && status === 'ok') {
+    heading += `  ${t.dim(wrapAnsi(summary, Math.max(8, width - 22))[0])}${statsText}`;
+  } else if (statsText) {
+    heading += statsText;
   }
   const rows = [heading];
   if (detailText && (showDetails || status === 'awaiting')) {
     rows.push(...wrapAnsi(detailText, width).map((line) => `  ${t.border('│')}  ${t.dim(line)}`));
   }
-  if (preview) {
-    if (preview && (showDetails || status === 'error' || status === 'denied')) {
-      rows.push(...wrapAnsi(preview, width).map((line) => `  ${t.border('│')}  ${status === 'error' ? t.red(line) : t.dim(line)}`));
-    }
+  if (preview && (showDetails || status === 'error' || status === 'denied') && !diff?.lines?.length) {
+    rows.push(...wrapAnsi(preview, width).map((line) => `  ${t.border('│')}  ${status === 'error' ? t.red(line) : t.dim(line)}`));
+  }
+  // Always show edit/write before→after when available (OpenCode-style).
+  // No tree gutter on diff lines so drag-select stays clean.
+  if (complete && status === 'ok' && diff?.lines?.length) {
+    const painted = paintDiffLinesFromModule(diff.lines, width);
+    rows.push(...painted.map((line) => `  ${line}`));
+    if (diff.truncated) rows.push(`  ${t.dim('… diff truncated')}`);
   }
   return rows.join('\n');
 }
 
+function paintDiffLinesFromModule(lines, width) {
+  // Lazy import avoided — keep draw.js free of cycles by inlining a thin paint using theme.
+  const max = Math.max(12, width - 4);
+  const out = [];
+  for (const line of (lines || []).slice(0, 48)) {
+    const marker = line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ';
+    let body = `${marker} ${line.text ?? ''}`;
+    if (body.length > max) body = `${body.slice(0, max - 1)}…`;
+    if (line.type === 'add') out.push(t.green(body));
+    else if (line.type === 'del') out.push(t.red(body));
+    else out.push(t.dim(body));
+  }
+  return out;
+}
+
 export function userBubble(text) {
-  const width = Math.max(12, Math.min(termWidth() - 7, 82));
+  const width = Math.max(12, termWidth() - 4);
   const lines = wrapAnsi(String(text), width);
-  return '\n' + lines.map((line) => `${t.user('  ▌')} ${line}`).join('\n') + '\n';
+  // Role label on its own line so multi-line drag-select does not include ▌ gutters.
+  return `\n${t.dim(t.user('you'))}\n${lines.map((line) => t.user(line)).join('\n')}\n`;
 }
 
 export function agentPrefix() {
@@ -291,7 +499,11 @@ function resultPreview(name, result) {
     const text = String(result.stderr || result.stdout).trim().replace(/\s+/g, ' ');
     if (text) return `output: ${text.slice(0, 160)}${text.length > 160 ? '…' : ''}`;
   }
-  if (result.path) return `${name === 'read_file' ? 'read' : 'updated'} ${shortPath(result.path)}`;
+  if (result.path) {
+    if (name === 'read_file') return `read ${shortPath(result.path)}`;
+    if (name === 'edit_file' || name === 'write_file') return shortPath(result.path);
+    return `updated ${shortPath(result.path)}`;
+  }
   if (Array.isArray(result.files)) return `${result.files.length} file${result.files.length === 1 ? '' : 's'} found`;
   if (Array.isArray(result.matches)) return `${result.matches.length} match${result.matches.length === 1 ? '' : 'es'} found`;
   return '';

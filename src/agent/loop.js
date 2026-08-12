@@ -15,7 +15,7 @@ export function toolsForMode(goalMode = false) {
  */
 export async function runAgentLoop(options = {}) {
   const runtime = createAgentRuntime(options);
-  return runtime.run(options.userText);
+  return runtime.run(options.userContent ?? options.userText);
 }
 
 export { createAgentRuntime } from './runtime.js';

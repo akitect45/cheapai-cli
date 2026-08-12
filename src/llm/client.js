@@ -1,6 +1,7 @@
 import OpenAI from 'openai';
 import { loadAuth, loadConfig, resolveApiKey, resolveBaseUrl, resolveModel, saveConfig } from '../config.js';
 import { getProvider } from './providers.js';
+import { DEFAULT_PROVIDER_MAX_RETRIES } from './errors.js';
 
 export function createClient(overrides = {}) {
   const auth = loadAuth();
@@ -34,8 +35,9 @@ export async function chatWithTools({
   reasoningEffort = null,
   onDelta,
   onThinking,
+  onRetry = null,
   signal = null,
-  maxRetries = 1,
+  maxRetries = DEFAULT_PROVIDER_MAX_RETRIES,
 }) {
   return getProvider('openai-compatible').stream({
     client,
@@ -47,6 +49,7 @@ export async function chatWithTools({
     signal,
     onDelta,
     onThinking,
+    onRetry,
     maxRetries,
   });
 }

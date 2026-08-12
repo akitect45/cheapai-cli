@@ -1,6 +1,6 @@
 {
   "name": "@akitect/cheapai",
-  "version": "0.3.1",
+  "version": "0.3.3",
   "description": "CheapAI coding agent with a focused terminal workspace",
   "type": "module",
   "bin": {

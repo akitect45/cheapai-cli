@@ -19,15 +19,17 @@ export async function runProcess({
 } = {}) {
   if (signal?.aborted) return terminalResult({ aborted: true });
   const [shell, args] = shellInvocation(command, platform, env);
+  const childEnv = platform === 'win32' ? utf8ChildEnvironment(env) : env;
   const child = spawn(shell, args, {
     cwd,
-    env,
+    env: childEnv,
     windowsHide: true,
+    windowsVerbatimArguments: platform === 'win32',
     detached: platform !== 'win32',
     stdio: ['ignore', 'pipe', 'pipe'],
   });
-  const stdout = createBoundedCollector(maxStdoutBytes);
-  const stderr = createBoundedCollector(maxStderrBytes);
+  const stdout = createBoundedCollector(maxStdoutBytes, platform);
+  const stderr = createBoundedCollector(maxStderrBytes, platform);
 
   return new Promise((resolve) => {
     let settled = false;
@@ -153,7 +155,13 @@ export function terminateRecordedProcess(record, platform = process.platform) {
 }
 
 export function shellInvocation(command, platform = process.platform, env = process.env) {
-  if (platform === 'win32') return [env.ComSpec || 'cmd.exe', ['/c', command]];
+  if (platform === 'win32') {
+    const text = String(command || '');
+    // Prefix UTF-8 code page. Do not re-wrap quoted executables — after `chcp &`
+    // an extra outer quote pair breaks `cmd /s /c` parsing (e.g. node -e scripts).
+    const wrapped = `chcp 65001>nul 2>&1 & ${text}`;
+    return [env.ComSpec || 'cmd.exe', ['/d', '/s', '/c', wrapped]];
+  }
   return ['bash', ['-lc', command]];
 }
 
@@ -163,7 +171,43 @@ export function safeChildEnvironment(source = process.env) {
   return env;
 }
 
-function createBoundedCollector(maxBytes) {
+/** Encourage child tools to emit UTF-8 on Windows. */
+export function utf8ChildEnvironment(source = process.env) {
+  const env = { ...source };
+  env.PYTHONIOENCODING = env.PYTHONIOENCODING || 'utf-8';
+  env.PYTHONUTF8 = env.PYTHONUTF8 || '1';
+  env.LANG = env.LANG || 'C.UTF-8';
+  env.LC_ALL = env.LC_ALL || 'C.UTF-8';
+  // Node itself when used as a child
+  env.NODE_OPTIONS = env.NODE_OPTIONS || '';
+  return env;
+}
+
+/**
+ * Decode process output: prefer valid UTF-8, fall back to Korean Windows code pages.
+ * Official Node builds with full ICU support `euc-kr` / related labels.
+ */
+export function decodeConsoleBuffer(buffer, platform = process.platform) {
+  const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || '');
+  if (!buf.length) return '';
+  try {
+    return new TextDecoder('utf-8', { fatal: true }).decode(buf);
+  } catch {
+    /* not strict utf-8 */
+  }
+  if (platform === 'win32') {
+    for (const encoding of ['euc-kr', 'windows-949', 'ibm949', 'iso-8859-1']) {
+      try {
+        return new TextDecoder(encoding).decode(buf);
+      } catch {
+        /* try next */
+      }
+    }
+  }
+  return buf.toString('utf8');
+}
+
+function createBoundedCollector(maxBytes, platform = process.platform) {
   const limit = Math.max(1024, Number(maxBytes) || 0);
   let chunks = [];
   let bytes = 0;
@@ -187,7 +231,7 @@ function createBoundedCollector(maxBytes) {
       }
     },
     text() {
-      return Buffer.concat(chunks, bytes).toString('utf8');
+      return decodeConsoleBuffer(Buffer.concat(chunks, bytes), platform);
     },
     truncated() {
       return clipped;

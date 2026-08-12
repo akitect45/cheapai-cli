@@ -5,6 +5,7 @@ import { atomicWriteFile } from './session-format.js';
 import { createPathPolicy } from './path-policy.js';
 import { runProcess, shellInvocation } from './process-runner.js';
 import { createToolRegistry, toToolDefinition } from './tool-contract.js';
+import { buildDiffPayload } from '../ui/diff.js';
 
 const TOOL_WIRE_SPECS = [
   {
@@ -202,7 +203,15 @@ export function createToolRuntime({
     atomicWriteFile(abs, content, { mode: existingFileMode(abs) });
     const after = snapshotFile(abs);
     onFileChange?.({ path: abs, before, after, restorable: before.restorable !== false && after.restorable !== false });
-    return { ok: true, path: abs, bytes: Buffer.byteLength(content, 'utf8') };
+    const beforeText = snapshotText(before);
+    const afterText = String(content ?? '');
+    return {
+      ok: true,
+      path: abs,
+      bytes: Buffer.byteLength(content, 'utf8'),
+      // OpenCode-style before/after for the TUI (and a compact hint for the model).
+      diff: buildDiffPayload(beforeText, afterText),
+    };
   }
 
   function editFile(filePath, old_string, new_string, replace_all = false) {
@@ -221,7 +230,26 @@ export function createToolRuntime({
     atomicWriteFile(abs, next, { mode: existingFileMode(abs) });
     const after = snapshotFile(abs);
     onFileChange?.({ path: abs, before, after, restorable: before.restorable !== false && after.restorable !== false });
-    return { ok: true, path: abs, replacements: replace_all ? count : 1 };
+    // Prefer the surgical span (old → new) so the UI shows the real edit, not the whole file.
+    return {
+      ok: true,
+      path: abs,
+      replacements: replace_all ? count : 1,
+      diff: buildDiffPayload(String(old_string ?? ''), String(new_string ?? '')),
+    };
+  }
+
+  function snapshotText(snapshot) {
+    if (!snapshot?.exists || snapshot.type !== 'file') return '';
+    if (snapshot.restorable === false) return '';
+    if (snapshot.encoding === 'base64') {
+      try {
+        return Buffer.from(snapshot.content || '', 'base64').toString('utf8');
+      } catch {
+        return '';
+      }
+    }
+    return String(snapshot.content || '');
   }
 
   function matchGlob(rel, pattern) {
@@ -412,8 +440,11 @@ export function createToolRuntime({
 
   function detailFor(name, args) {
     if (name === 'bash') return args.command;
-    if (name === 'write_file' || name === 'edit_file' || name === 'read_file') return args.path;
-    return JSON.stringify(args).slice(0, 200);
+    if (name === 'read_file' || name === 'write_file' || name === 'edit_file') return String(args.path || '').trim();
+    if (name === 'glob') return String(args.pattern || '').trim();
+    if (name === 'grep') return `${args.pattern || ''}${args.path ? ` ${args.path}` : ''}`.trim();
+    if (name === 'todo_write') return Array.isArray(args.todos) ? `${args.todos.length} task(s)` : '';
+    return `${name} ${JSON.stringify(args).slice(0, 180)}`.trim();
   }
 
   return {
