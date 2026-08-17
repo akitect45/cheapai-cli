@@ -4,6 +4,8 @@ import {
   providerRetryDelayMs,
   DEFAULT_PROVIDER_MAX_RETRIES,
 } from './errors.js';
+import { buildResponsesCreateBody } from './responses-format.js';
+import { streamResponsesTurn } from './responses-ws.js';
 
 const providers = new Map();
 
@@ -112,7 +114,77 @@ export function createOpenAICompatibleProvider() {
   };
 }
 
+export function createResponsesWsProvider() {
+  return {
+    id: 'openai-responses-ws',
+    async stream({
+      client,
+      model,
+      messages,
+      tools,
+      temperature = 0.2,
+      reasoningEffort = null,
+      signal = null,
+      onDelta,
+      onThinking,
+      onRetry = null,
+      maxRetries = DEFAULT_PROVIDER_MAX_RETRIES,
+      baseURL,
+      apiKey,
+    }) {
+      const body = buildResponsesCreateBody({ model, messages, tools, temperature, reasoningEffort });
+      let reasoningFallback = false;
+      const retryBudget = Math.max(0, Number(maxRetries) || 0);
+      for (let attempt = 0; ; attempt++) {
+        try {
+          return await streamResponsesTurn({
+            baseURL: baseURL || client?.baseURL,
+            apiKey: apiKey || client?.apiKey,
+            body,
+            signal,
+            onDelta,
+            onThinking,
+          });
+        } catch (error) {
+          if (error.partialOutput) throw error;
+          if (!reasoningFallback && hasReasoningFields(body) && /reasoning|effort|unknown|unrecognized/i.test(String(error?.message || error))) {
+            delete body.reasoning;
+            delete body.reasoning_effort;
+            reasoningFallback = true;
+            continue;
+          }
+          if (attempt >= retryBudget || !isRetryableProviderError(error)) throw error;
+          const classification = classifyProviderError(error);
+          const waitMs = providerRetryDelayMs(attempt, { retryAfterMs: classification.retryAfterMs });
+          onRetry?.({
+            attempt: attempt + 1,
+            maxRetries: retryBudget,
+            waitMs,
+            classification,
+            error,
+          });
+          if (waitMs > 0) await delay(waitMs, signal);
+        }
+      }
+    },
+    async complete(options) {
+      return getProvider('openai-compatible').complete(options);
+    },
+    async models(options) {
+      return getProvider('openai-compatible').models(options);
+    },
+    auth({ apiKey, baseURL } = {}) {
+      return { scheme: 'bearer', configured: Boolean(apiKey), baseURL: baseURL || null, wireApi: 'responses-ws' };
+    },
+    classifyError: classifyProviderError,
+    normalizeUsage(usage) {
+      return usage || null;
+    },
+  };
+}
+
 registerProvider(createOpenAICompatibleProvider());
+registerProvider(createResponsesWsProvider());
 
 export function normalizeModelMetadata(model = {}) {
   return {
@@ -186,7 +258,7 @@ async function consumeStream({ client, body, signal, onDelta, onThinking }) {
 }
 
 function hasReasoningFields(body) {
-  return Boolean(body.reasoning_effort || body.extra_body?.reasoning_effort);
+  return Boolean(body.reasoning_effort || body.reasoning || body.extra_body?.reasoning_effort);
 }
 
 function delay(ms, signal) {

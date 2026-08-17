@@ -89,6 +89,7 @@ export function loadConfig() {
     pathMode: 'workspace',
     extraRoots: [],
     approvedExtensions: [],
+    wireApi: 'chat',
   };
   if (!fs.existsSync(p)) return defaults;
   try {
@@ -153,6 +154,13 @@ export function resolveBaseUrl(cfg = loadConfig(), auth = loadAuth()) {
 
 export function resolveModel(cliModel, cfg = loadConfig()) {
   return cliModel || process.env.CHEAPAI_MODEL || cfg.model || DEFAULT_MODEL;
+}
+
+export function resolveWireApi(override, cfg = loadConfig()) {
+  const raw = override || process.env.CHEAPAI_WIRE_API || cfg.wireApi || 'chat';
+  const value = String(raw).trim().toLowerCase();
+  if (value === 'responses-ws' || value === 'responses' || value === 'wss') return 'responses-ws';
+  return 'chat';
 }
 
 /** Find project instruction files walking up from cwd */

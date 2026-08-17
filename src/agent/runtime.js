@@ -146,7 +146,7 @@ export function createAgentRuntime(options = {}) {
       emit('agent_start', { model: session.model || model });
       try {
         const content = Array.isArray(userText) ? userText : String(userText || '');
-        const titleText = Array.isArray(content) ? content.map((part) => part?.text || '').join(' ') : content;
+        const titleText = Array.isArray(content) ? content.map((part) => part?.text || part?.content || '').join(' ') : content;
         session.messages.push({ role: 'user', content });
         if (!session.title) session.title = sessionTitle(titleText);
         saveSession(session);
@@ -636,7 +636,10 @@ function abortError() {
 }
 
 function sessionTitle(value) {
-  const clean = String(value || '')
+  const raw = Array.isArray(value)
+    ? value.map((part) => (typeof part === 'string' ? part : part?.text || part?.content || '')).join(' ')
+    : value;
+  const clean = String(raw || '')
     .replace(/\x1b\[[0-?]*[ -/]*[@-~]/g, '')
     .replace(/[\x00-\x1f\x7f-\x9f]/g, ' ')
     .replace(/\s+/g, ' ')
