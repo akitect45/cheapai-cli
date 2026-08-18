@@ -2,6 +2,9 @@
 export const DEFAULT_PROVIDER_MAX_RETRIES = 5;
 
 export function classifyProviderError(error) {
+  if (error?.code === 'stream_idle_timeout') {
+    return { category: 'timeout', retryable: false, status: 408 };
+  }
   if (error?.name === 'AbortError' || /aborted|abort/i.test(String(error?.message || error))) {
     return { category: 'aborted', retryable: false };
   }

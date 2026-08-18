@@ -196,9 +196,9 @@ turn을 undo/redo합니다. 실행 중 `Escape` 또는 `Ctrl+C`는 생성과 실
 않습니다. Bash가 만든 변경은 자동으로 되돌리거나 재실행하지 않습니다.
 
 CLI는 하루에 한 번 npm의 `@akitect/cheapai` 최신 버전을 확인합니다. 새 버전이
-있으면 TUI에 업데이트 안내와 함께 `npm i @akitect/cheapai` 명령을 표시합니다.
-네트워크 오류는 실행을 막지 않으며, `CHEAPAI_NO_UPDATE_CHECK=1`로 확인을 끌 수
-있습니다.
+있으면 TUI에 안내를 남기고 `/update` 또는 `cheapai --update`로 설치할 수 있습니다.
+시작 확인은 TUI를 막지 않으며, 네트워크 오류는 실행을 막지 않습니다.
+`CHEAPAI_NO_UPDATE_CHECK=1`로 확인을 끌 수 있습니다.
 
 ## 개발
 

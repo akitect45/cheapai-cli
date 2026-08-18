@@ -3,6 +3,7 @@ import test from 'node:test';
 import {
   decodeConsoleBuffer,
   shellInvocation,
+  trimIncompleteUtf8,
   utf8ChildEnvironment,
 } from '../src/agent/process-runner.js';
 
@@ -28,4 +29,19 @@ test('utf8ChildEnvironment sets encoding-friendly defaults', () => {
   assert.equal(env.FOO, '1');
   assert.equal(env.PYTHONIOENCODING, 'utf-8');
   assert.equal(env.PYTHONUTF8, '1');
+});
+
+test('trimIncompleteUtf8 drops a split Hangul syllable instead of leaving a broken lead', () => {
+  const ga = Buffer.from('가', 'utf8');
+  assert.equal(ga.length, 3);
+  assert.equal(trimIncompleteUtf8(ga.subarray(0, 2)).length, 0);
+  assert.equal(trimIncompleteUtf8(Buffer.concat([ga.subarray(2), Buffer.from('나', 'utf8')])).toString('utf8'), '나');
+});
+
+test('decodeConsoleBuffer does not CP949-mojibake truncated UTF-8 Korean', () => {
+  const hangul = Buffer.from('한글 출력', 'utf8');
+  const split = Buffer.concat([hangul.subarray(1), Buffer.from(' 테스트', 'utf8')]);
+  const text = decodeConsoleBuffer(split, 'win32');
+  assert.match(text, /테스트/);
+  assert.equal(text.includes('\uFFFD'), false);
 });

@@ -37,12 +37,12 @@ export function statusBanner(label, width = termWidth(), paint = (s) => t.dim(s)
 export function box(lines, { title, width } = {}) {
   const w = width || Math.max(18, termWidth() - 2);
   const top = title
-    ? `╭─ ${title} ${'─'.repeat(Math.max(0, w - title.length - 4))}╮`
+    ? `╭─ ${title} ${'─'.repeat(Math.max(0, w - displayWidth(title) - 4))}╮`
     : `╭${'─'.repeat(w)}╮`;
   const bot = `╰${'─'.repeat(w)}╯`;
   const body = lines.map((line) => {
     const plain = stripAnsi(String(line));
-    const pad = Math.max(0, w - 2 - plain.length);
+    const pad = Math.max(0, w - 2 - displayWidth(plain));
     return `│ ${line}${' '.repeat(pad)}│`;
   });
   return [t.border(top), ...body.map((l) => t.border(l.slice(0, 1)) + l.slice(1, -1) + t.border(l.slice(-1))), t.border(bot)].join(
@@ -97,6 +97,17 @@ export function iterateGraphemes(value) {
     return [...graphemeSegmenter.segment(text)].map(({ segment }) => segment);
   }
   return [...text];
+}
+
+/** Compact elapsed clock for the busy header (`12s`, `3m 04s`). */
+export function formatElapsed(ms) {
+  const total = Math.max(0, Math.floor(Number(ms) / 1000) || 0);
+  if (total < 60) return `${total}s`;
+  const minutes = Math.floor(total / 60);
+  const seconds = total % 60;
+  if (minutes < 60) return `${minutes}m ${String(seconds).padStart(2, '0')}s`;
+  const hours = Math.floor(minutes / 60);
+  return `${hours}h ${minutes % 60}m`;
 }
 
 /**
@@ -426,7 +437,10 @@ function paintDiffLinesFromModule(lines, width) {
   for (const line of (lines || []).slice(0, 48)) {
     const marker = line.type === 'add' ? '+' : line.type === 'del' ? '-' : ' ';
     let body = `${marker} ${line.text ?? ''}`;
-    if (body.length > max) body = `${body.slice(0, max - 1)}…`;
+    if (displayWidth(body) > max) body = `${[...iterateGraphemes(body)].reduce((out, char) => {
+      if (displayWidth(out + char + '…') > max) return out;
+      return out + char;
+    }, '')}…`;
     if (line.type === 'add') out.push(t.green(body));
     else if (line.type === 'del') out.push(t.red(body));
     else out.push(t.dim(body));
@@ -513,7 +527,7 @@ function clip(value, max) {
   const text = String(value);
   if (displayWidth(text) <= max) return text;
   let out = '';
-  for (const char of text) {
+  for (const char of iterateGraphemes(text)) {
     if (displayWidth(out + char + '…') > max) break;
     out += char;
   }

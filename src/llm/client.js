@@ -38,6 +38,7 @@ export async function chatWithTools({
   onRetry = null,
   signal = null,
   maxRetries = DEFAULT_PROVIDER_MAX_RETRIES,
+  idleTimeoutMs,
 }) {
   return getProvider('openai-compatible').stream({
     client,
@@ -51,6 +52,7 @@ export async function chatWithTools({
     onThinking,
     onRetry,
     maxRetries,
+    idleTimeoutMs,
   });
 }
 

@@ -85,6 +85,29 @@ test('provider never retries after tool-call fragments have started', async () =
   assert.equal(attempts, 1);
 });
 
+test('provider aborts a silent stream instead of spinning forever', async () => {
+  const started = Date.now();
+  const client = fakeClient(async () => ({
+    async *[Symbol.asyncIterator]() {
+      await new Promise((resolve) => {
+        const timer = setTimeout(resolve, 30_000);
+        timer.unref?.();
+      });
+    },
+  }));
+  await assert.rejects(
+    () => chatWithTools({ client, model: 'test', messages: [], idleTimeoutMs: 80 }),
+    (error) => error.code === 'stream_idle_timeout',
+  );
+  assert.ok(Date.now() - started < 1500, `idle stream hung for ${Date.now() - started}ms`);
+});
+
+test('provider idle stalls are not retried (avoids 10–30 minute spinner loops)', () => {
+  const error = Object.assign(new Error('stalled'), { code: 'stream_idle_timeout', name: 'TimeoutError' });
+  assert.equal(classifyProviderError(error).retryable, false);
+  assert.equal(classifyProviderError(error).category, 'timeout');
+});
+
 test('provider errors have stable classifications', () => {
   assert.deepEqual(classifyProviderError({ status: 401 }), { category: 'auth', retryable: false, status: 401 });
   assert.equal(classifyProviderError({ status: 429 }).retryable, true);

@@ -19,10 +19,11 @@ export async function runBrowserAuthFlow({ webOrigin } = {}) {
   const origin = (webOrigin || cfg.webOrigin || DEFAULT_WEB_ORIGIN).replace(/\/$/, '');
   const debug = process.env.CHEAPAI_DEBUG === '1' || process.env.CHEAPAI_DEBUG === 'true';
   const savedAuth = loadAuth();
-  if (savedAuth?.apiKey && savedAuth.keyName === 'CheapAI CLI (browser)') {
+  const browserKeyNames = new Set(['CheapAI APP (browser)', 'CheapAI CLI (browser)', 'CheapAI (browser)']);
+  if (savedAuth?.apiKey && browserKeyNames.has(savedAuth.keyName)) {
     const savedOrigin = String(savedAuth.webOrigin || cfg.webOrigin || DEFAULT_WEB_ORIGIN).replace(/\/$/, '');
     if (savedOrigin === origin) {
-      console.log(t.dim('  Reusing existing CheapAI CLI browser credential.'));
+      console.log(t.dim('  Reusing existing CheapAI browser credential.'));
       return savedAuth;
     }
   }
@@ -150,7 +151,7 @@ export async function runBrowserAuthFlow({ webOrigin } = {}) {
         try {
           const auth = await loginWithApiKey(key, {
             username: poll.username,
-            keyName: poll.key_name || 'CheapAI CLI (browser)',
+            keyName: poll.key_name || 'CheapAI APP (browser)',
             baseUrl: poll.base_url || undefined,
           });
           console.log(t.green(`  ${icons.check} Connected to CheapAI CLI`));

@@ -14,6 +14,7 @@ import {
   stripAnsi,
   wrapAnsi,
   writeTerminalTitle,
+  formatElapsed,
 } from './draw.js';
 import { paintDiffLines } from './diff.js';
 import { copyText } from './clipboard.js';
@@ -60,6 +61,7 @@ const COMMANDS = [
   ['/clear', 'start a new session'],
   ['/dashboard', 'open web dashboard'],
   ['/config', 'show local configuration'],
+  ['/update', 'install the latest published version'],
   ['/logout', 'clear credentials and quit'],
   ['/exit', 'quit'],
   ['/quit', 'quit'],
@@ -84,6 +86,8 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     commandIndex: 0,
     scroll: 0,
     busy: false,
+    busyStartedAt: 0,
+    busyActivity: '',
     showToolDetails: false,
     showThinking,
     showBalance,
@@ -1544,7 +1548,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     state.entries.push({ type: 'user', text: String(text) });
     state.contextEstimate += Math.ceil(String(text).length / 4) + 12;
     state.scroll = 0;
-    state.busy = true;
+    markBusy('model');
     renderSoon();
   }
 
@@ -1632,9 +1636,20 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     renderSoon();
   }
 
+  function markBusy(activity = '') {
+    if (!state.busy) state.busyStartedAt = Date.now();
+    state.busy = true;
+    if (activity) state.busyActivity = activity;
+  }
+
   function setBusy(value) {
-    state.busy = !!value;
-    if (!state.busy) state.pendingQueue = [];
+    if (value) markBusy(state.busyActivity || 'model');
+    else {
+      state.busy = false;
+      state.busyStartedAt = 0;
+      state.busyActivity = '';
+      state.pendingQueue = [];
+    }
     renderSoon();
   }
 
@@ -1672,6 +1687,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
   function agentHooks() {
     return {
       onThinking(turn) {
+        markBusy('model');
         if (state.activeThinking) state.activeThinking.active = false;
         const entry = { type: 'thinking', turn, text: '', active: true };
         state.entries.push(entry);
@@ -1688,6 +1704,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
         renderSoon();
       },
       onAssistantStart() {
+        markBusy('model');
         stopThinking();
         state.entries.push({ type: 'assistant', text: '', startedAt: Date.now() });
         renderSoon();
@@ -1718,6 +1735,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
       },
       onToolPending() {},
       onToolStart(name, detail) {
+        markBusy(toolLabel(name));
         stopThinking();
         state.entries.push({ type: 'tool', name, detail, status: 'running', result: null, expanded: true });
         renderSoon();
@@ -1941,7 +1959,11 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     const project = clean(path.basename(state.cwd) || shortPath(state.cwd));
     const focusTag = state.focus === 'scrollback' ? t.dim('[scrollback]') : t.dim('[prompt]');
     const leftText = `${t.bold(t.accent('◆ cheapai'))} ${t.dim('/')} ${t.white(clipCells(project, Math.max(8, Math.floor(contentWidth * 0.28))))} ${focusTag}`;
-    const busy = state.busy ? `${t.yellow(SPINNER[state.frame])} ${t.dim('working')}` : t.green('● ready');
+    const elapsed = state.busy && state.busyStartedAt ? formatElapsed(Date.now() - state.busyStartedAt) : '';
+    const activity = state.busyActivity ? ` ${state.busyActivity}` : '';
+    const busy = state.busy
+      ? `${t.yellow(SPINNER[state.frame])} ${t.dim(`working${activity}${elapsed ? ` ${elapsed}` : ''}`)}`
+      : t.green('● ready');
     const workspaceMode = state.goalMode ? t.magenta('goal · plan only') : permissionLabel(state.mode);
     const rightText = `${t.cyan(clipCells(clean(state.model), Math.max(8, Math.floor(contentWidth * 0.3))))}  ${workspaceMode}`;
     screen[0] = offsetLine(joinSides(leftText, rightText, contentWidth), left);
@@ -2368,21 +2390,21 @@ function padLine(line, width) {
   return `${clipped}${' '.repeat(Math.max(0, safeWidth - displayWidth(clipped)))}`;
 }
 
-function clipStyled(value, maxWidth) {
-  const text = String(value || '');
-  if (displayWidth(text) <= maxWidth) return text;
-  return clipCells(stripAnsi(text), maxWidth);
-}
-
 function clipCells(value, maxWidth) {
   const text = String(value || '');
   if (displayWidth(text) <= maxWidth) return text;
   let out = '';
-  for (const char of text) {
+  for (const char of iterateGraphemes(text)) {
     if (displayWidth(`${out}${char}…`) > maxWidth) break;
     out += char;
   }
   return `${out}…`;
+}
+
+function clipStyled(value, maxWidth) {
+  const text = String(value || '');
+  if (displayWidth(text) <= maxWidth) return text;
+  return wrapAnsi(text, Math.max(1, maxWidth))[0] || '';
 }
 
 function paintNotice(value, tone) {

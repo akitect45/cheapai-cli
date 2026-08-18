@@ -60,7 +60,7 @@ export function redactAuthSecrets(value) {
 
 // ─── Device code ────────────────────────────────────────────────────────────
 
-export async function startDeviceAuth({ webOrigin } = {}) {
+export async function startDeviceAuth({ webOrigin, clientName = 'CheapAI APP' } = {}) {
   const origin = (webOrigin || loadConfig().webOrigin || DEFAULT_WEB_ORIGIN).replace(/\/$/, '');
   const paths = [
     DEVICE_CODE_PATH,
@@ -76,7 +76,7 @@ export async function startDeviceAuth({ webOrigin } = {}) {
         body: JSON.stringify({
           client: 'cheapai-cli',
           client_id: 'cheapai-cli',
-          client_name: 'CheapAI CLI',
+          client_name: clientName,
         }),
       });
       const text = await res.text();
@@ -222,7 +222,7 @@ export function normalizePollResult(body, httpStatus) {
     status,
     api_key: api_key ? String(api_key).trim() : null,
     username,
-    key_name: b.key_name || b.keyName || data.key_name || 'CheapAI CLI (browser)',
+    key_name: b.key_name || b.keyName || data.key_name || 'CheapAI APP (browser)',
     base_url: b.base_url || b.baseUrl || data.base_url || null,
     interval: Number(b.interval || data.interval) || null,
     error: b.error || b.message || data.error || null,

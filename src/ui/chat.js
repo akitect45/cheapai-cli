@@ -62,7 +62,7 @@ import {
   sessionUsageRows,
 } from '../agent/usage.js';
 import { redoTurn, undoTurn } from '../agent/history.js';
-import { formatUpdateNotice } from '../update.js';
+import { formatUpdateNotice, installLatestVersion } from '../update.js';
 import { loadExtensions } from '../resources/extensions.js';
 
 /**
@@ -76,6 +76,7 @@ export async function startChatTui({
   updateInfo = null,
 } = {}) {
   const startupUpdate = updateInfo || opts.updateInfo || null;
+  const updateInfoPromise = opts.updateInfoPromise || null;
   const requestedCwd = path.resolve(opts.cwd || process.cwd());
   const cfg = loadScopedConfig(requestedCwd);
   let session;
@@ -356,6 +357,7 @@ export async function startChatTui({
       ui: print ? null : ui.agentHooks(),
       customTools: extensionRuntime.tools,
       eventHooks: extensionRuntime.hooks,
+      streamIdleTimeoutMs: Number(cfg.streamIdleTimeoutMs) > 0 ? Number(cfg.streamIdleTimeoutMs) : undefined,
       pathMode: permissionMode === 'yolo' ? 'unrestricted' : cfg.pathMode || 'workspace',
       extraRoots: Array.isArray(cfg.extraRoots) ? cfg.extraRoots : [],
     });
@@ -402,7 +404,7 @@ export async function startChatTui({
           ui.setBusy(false);
         }
       }
-      if (startupUpdate) ui.addNotice?.(formatUpdateNotice(startupUpdate), 'warning');
+      showStartupUpdate(ui, startupUpdate, updateInfoPromise);
       while (true) {
         const line = (await ui.readInput()).trim();
         if (!line) continue;
@@ -440,7 +442,7 @@ export async function startChatTui({
   if (prompt) {
     await runOnce(prompt);
   }
-  if (startupUpdate) ui.addNotice?.(formatUpdateNotice(startupUpdate), 'warning');
+  showStartupUpdate(ui, startupUpdate, updateInfoPromise);
 
   let history = [];
   while (true) {
@@ -768,6 +770,29 @@ export async function startChatTui({
         if (!message) return false;
         return copyText(message.content);
       },
+      async runUpdate() {
+        ui.addNotice('Updating...', 'warning');
+        ui.setBusy(true);
+        ui.destroy();
+        let result;
+        let failure = null;
+        try {
+          result = await installLatestVersion();
+          process.stdout.write(`\n${result.message}\n\n`);
+        } catch (error) {
+          failure = error;
+          process.stdout.write(`\nUpdate failed: ${error.message || error}\n\n`);
+        } finally {
+          ui.mount();
+          ui.setBusy(false);
+        }
+        if (failure) {
+          ui.addNotice(`Update failed: ${failure.message || failure}`, "error");
+          throw failure;
+        }
+        ui.addNotice(result.message, result.updated ? 'success' : 'muted');
+        return result;
+      },
       async runPrompt(text) {
         return runOnce(text);
       },
@@ -777,6 +802,21 @@ export async function startChatTui({
     if (sessionPersisted && session) releaseSessionLease(session);
     else sessionLease?.release();
   }
+}
+
+function showStartupUpdate(ui, startupUpdate, updateInfoPromise) {
+  const show = (info) => {
+    if (!info) return;
+    const text = formatUpdateNotice(info);
+    if (typeof ui.addBanner === 'function') ui.addBanner(text, 'warning');
+    else ui.addNotice?.(text, 'warning');
+  };
+  if (startupUpdate) {
+    show(startupUpdate);
+    return;
+  }
+  if (!updateInfoPromise) return;
+  void Promise.resolve(updateInfoPromise).then(show).catch(() => {});
 }
 
 export async function handleSlash(line, ctx) {
@@ -1039,6 +1079,19 @@ export async function handleSlash(line, ctx) {
     return true;
   }
 
+  if (c === 'update') {
+    if (typeof ctx.runUpdate !== 'function') {
+      ctx.notify('This environment does not support /update. Run `cheapai --update`.', 'error');
+      return true;
+    }
+    try {
+      await ctx.runUpdate();
+    } catch {
+      // runUpdate has already restored the UI and presented the error.
+    }
+    return true;
+  }
+
   if (c === 'clear' || c === 'new') {
     ctx.recreateSession();
     return true;
@@ -1214,6 +1267,7 @@ function printHelp() {
   /new  /clear          new session
   /dashboard            open cheapai.im dashboard
   /config               show local config
+  /update               install latest published version
   /logout               clear credentials & exit
   /exit                 quit
 `);
@@ -1249,6 +1303,7 @@ function showHelp(ctx) {
     ['/new /clear', 'start a new session'],
     ['/dashboard', 'open web dashboard'],
     ['/config', 'show local configuration'],
+    ['/update', 'install the latest published version'],
     ['/logout', 'clear credentials and quit'],
     ['/exit', 'quit'],
   ];

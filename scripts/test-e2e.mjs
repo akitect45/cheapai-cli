@@ -317,6 +317,17 @@ console.log('cheapai e2e\n');
   if (displayWidth('한글') !== 4) bad('terminal CJK width', new Error('unexpected width'));
   else ok('terminal CJK width');
 
+  const { VERSION } = await import('../src/ui/theme.js');
+  const pkg = JSON.parse(fs.readFileSync(path.join(root, 'package.json'), 'utf8'));
+  if (VERSION !== pkg.version) bad('version source of truth', new Error(`${VERSION} !== ${pkg.version}`));
+  else ok('version source of truth');
+
+  const { formatUpdateNotice, isNewerVersion } = await import('../src/update.js');
+  const notice = formatUpdateNotice({ currentVersion: '0.3.2', latestVersion: '0.3.3', installCommand: 'cheapai --update' });
+  if (!notice.includes('/update') || !notice.includes('cheapai --update') || isNewerVersion(pkg.version, VERSION)) {
+    bad('update notice', new Error(notice));
+  } else ok('update notice');
+
   if (displayWidth('😀') !== 2) bad('terminal emoji width', new Error('unexpected width'));
   else ok('terminal emoji width');
 
@@ -547,6 +558,10 @@ console.log('cheapai e2e\n');
   if (edits.requiresApproval('edit_file') || !edits.requiresApproval('bash')) {
     bad('permission edit policy', new Error('unexpected approval policy'));
   } else ok('permission edit policy');
+  const strict = createPermissionGate('strict');
+  if (!strict.requiresApproval('read_file') || !strict.requiresApproval('edit_file') || !strict.requiresApproval('bash')) {
+    bad('permission strict policy', new Error('chat strict mode must approve reads, edits, and shell'));
+  } else ok('permission strict policy');
 
   const printGate = createPermissionGate('ask', null, { interactive: false });
   if (await printGate.approve('bash', 'echo should-not-prompt')) {

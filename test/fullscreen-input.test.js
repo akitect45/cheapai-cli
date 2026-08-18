@@ -49,3 +49,21 @@ test('repeated identical snapshots stay byte-identical (dirty paint safety)', ()
   const b = ui.renderSnapshot(100, 30);
   assert.equal(a, b);
 });
+
+test('busy header shows the current tool so long work is not a blank spinner', () => {
+  const ui = makeUi();
+  ui.setBusy(true);
+  ui.agentHooks().onToolStart('bash', 'npm test');
+  const plain = stripAnsi(ui.renderSnapshot(100, 30));
+  assert.match(plain, /working/);
+  assert.match(plain, /Bash/);
+  assert.match(plain, /\d+s/);
+});
+
+test('update banner stays in the transcript instead of vanishing after a toast', () => {
+  const ui = makeUi();
+  ui.addBanner('업데이트 있음: 0.3.2 → 0.3.3 · /update 또는 cheapai --update', 'warning');
+  const plain = stripAnsi(ui.renderSnapshot(100, 30));
+  assert.match(plain, /업데이트 있음: 0\.3\.2 → 0\.3\.3/);
+  assert.match(plain, /\/update/);
+});

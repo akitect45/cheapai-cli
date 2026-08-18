@@ -28,6 +28,8 @@ export function listProviders() {
   return [...providers.values()];
 }
 
+export const DEFAULT_STREAM_IDLE_TIMEOUT_MS = 5 * 60_000;
+
 export function createOpenAICompatibleProvider() {
   return {
     id: 'openai-compatible',
@@ -43,6 +45,7 @@ export function createOpenAICompatibleProvider() {
       onThinking,
       onRetry = null,
       maxRetries = DEFAULT_PROVIDER_MAX_RETRIES,
+      idleTimeoutMs = DEFAULT_STREAM_IDLE_TIMEOUT_MS,
     }) {
       const body = {
         model,
@@ -68,6 +71,7 @@ export function createOpenAICompatibleProvider() {
             signal,
             onDelta,
             onThinking,
+            idleTimeoutMs,
           });
         } catch (error) {
           // Visible assistant text or tool-call fragments cannot be safely replayed
@@ -127,16 +131,19 @@ export function normalizeModelMetadata(model = {}) {
   };
 }
 
-async function consumeStream({ client, body, signal, onDelta, onThinking }) {
+async function consumeStream({ client, body, signal, onDelta, onThinking, idleTimeoutMs = DEFAULT_STREAM_IDLE_TIMEOUT_MS }) {
   const stream = await client.chat.completions.create(body, signal ? { signal } : undefined);
   let content = '';
   const toolMap = new Map();
   let finish_reason = null;
   let usage = null;
   let thinking = '';
+  const iterator = stream[Symbol.asyncIterator]();
 
   try {
-    for await (const chunk of stream) {
+    for (;;) {
+      const { value: chunk, done } = await readStreamChunk(iterator, signal, idleTimeoutMs);
+      if (done) break;
       if (chunk.usage) usage = chunk.usage;
       const choice = chunk.choices?.[0];
       if (!choice) continue;
@@ -183,6 +190,50 @@ async function consumeStream({ client, body, signal, onDelta, onThinking }) {
     usage,
     thinking,
   };
+}
+
+function streamIdleError(idleMs) {
+  const seconds = Math.max(1, Math.round(Number(idleMs) / 1000));
+  const error = new Error(`Model stream stalled for ${seconds}s with no output.`);
+  error.name = 'TimeoutError';
+  error.code = 'stream_idle_timeout';
+  return error;
+}
+
+function readStreamChunk(iterator, signal, idleTimeoutMs) {
+  const idleMs = Number(idleTimeoutMs);
+  const next = iterator.next();
+  if (!(idleMs > 0) && !signal) return next;
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (fn, value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      fn(value);
+    };
+    const onAbort = () => finish(reject, abortErrorFromSignal(signal));
+    const timer = idleMs > 0
+      ? setTimeout(() => finish(reject, streamIdleError(idleMs)), idleMs)
+      : null;
+    timer?.unref?.();
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) {
+      onAbort();
+      return;
+    }
+    next.then(
+      (result) => finish(resolve, result),
+      (error) => finish(reject, error),
+    );
+  });
+}
+
+function abortErrorFromSignal(signal) {
+  const error = signal?.reason instanceof Error ? signal.reason : new Error('The operation was aborted.');
+  error.name = 'AbortError';
+  return error;
 }
 
 function hasReasoningFields(body) {

@@ -27,9 +27,19 @@ import {
 import fs from 'node:fs';
 import path from 'node:path';
 import { loadCustomAgents } from './agent/commands.js';
-import { checkForUpdate } from './update.js';
+import { checkForUpdate, installLatestVersion } from './update.js';
+
+function configureStdio() {
+  try {
+    process.stdout.setDefaultEncoding?.('utf8');
+    process.stderr.setDefaultEncoding?.('utf8');
+  } catch {
+    /* ignore */
+  }
+}
 
 export async function main(argv = process.argv) {
+  configureStdio();
   const args = argv.slice(2);
   const command = args[0];
   const skipUpdateCheck = args.includes('--help')
@@ -40,12 +50,22 @@ export async function main(argv = process.argv) {
     || args.includes('--print')
     || args.includes('-p')
     || ['login', 'logout', 'whoami', 'models', 'usage', 'stats', 'session', 'agent', 'export', 'import', 'credits', 'config', 'dashboard'].includes(command);
-  const updateInfo = skipUpdateCheck ? null : await checkForUpdate();
+  if (args.includes('--update')) {
+    console.log('Checking for updates...');
+    const result = await installLatestVersion();
+    console.log(`\n${result.message}\n`);
+    return;
+  }
+
+  // Never block TUI boot on the registry. A hung npm check used to leave
+  // "업데이트 있음" on screen with no follow-up work.
+  const updateInfoPromise = skipUpdateCheck ? Promise.resolve(null) : checkForUpdate();
   const program = new Command();
   program
     .name('cheapai')
     .description('CheapAI coding agent')
     .version(VERSION)
+    .option('--update', 'Update CheapAI to the latest published version')
     .argument('[prompt...]', 'Optional initial prompt')
     .option('-p, --print', 'Headless one-shot', false)
     .option('-m, --model <model>', 'Model id')
@@ -63,7 +83,7 @@ export async function main(argv = process.argv) {
     .option('--login', 'Force auth picker even if already signed in', false)
     .action(async (promptParts, opts) => {
       const prompt = promptParts.join(' ').trim();
-      await boot({ prompt, opts: { ...opts, updateInfo } });
+      await boot({ prompt, opts: { ...opts, updateInfoPromise } });
     });
 
   program
@@ -157,7 +177,7 @@ export async function main(argv = process.argv) {
     .option('--max-turns <n>', 'Max tool loops', (value) => Number(value))
     .option('--no-auto-compact', 'Disable automatic context compaction')
     .action(async (promptParts, opts) => {
-      await boot({ prompt: promptParts.join(' ').trim(), opts: { ...opts, updateInfo } });
+      await boot({ prompt: promptParts.join(' ').trim(), opts: { ...opts, updateInfoPromise } });
     });
 
   program

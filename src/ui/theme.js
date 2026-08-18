@@ -3,6 +3,10 @@
  * Keep green/red for diffs & success/error; blue/cyan OK for links and secondary meta.
  */
 
+import { createRequire } from 'node:module';
+
+const require = createRequire(import.meta.url);
+
 const colorEnabled = process.stdout.isTTY === true && !process.env.NO_COLOR && process.env.TERM !== 'dumb';
 const style = (code, value) => colorEnabled ? `\x1b[${code}m${value}\x1b[0m` : String(value);
 
@@ -48,4 +52,6 @@ export const icons = {
   chat: '◇',
 };
 
-export const VERSION = '0.3.2';
+// Always follow package.json so a published build cannot advertise a stale
+// version (0.3.3 shipped with theme VERSION 0.3.2, so "update available" never cleared).
+export const VERSION = String(require('../../package.json').version);

@@ -56,7 +56,36 @@ test('aborting bash terminates its Unix process group', { skip: process.platform
   }
 }));
 
+test('bash timeout returns timed_out instead of hanging', async () => {
+  const started = Date.now();
+  const result = await runProcess({
+    command: `"${process.execPath}" -e "setTimeout(()=>{}, 8000)"`,
+    cwd: os.tmpdir(),
+    timeoutMs: 120,
+  });
+  assert.equal(result.timed_out, true);
+  assert.ok(Date.now() - started < 4000, `bash timeout hung for ${Date.now() - started}ms`);
+});
+
+test('glob returns immediately when already aborted', async () => withWorkspace(async (root) => {
+  const runtime = createToolRuntime({ cwd: root });
+  const controller = new AbortController();
+  controller.abort();
+  const started = Date.now();
+  await assert.rejects(
+    () => runtime.execute('glob', { pattern: '**/*' }, { signal: controller.signal }),
+    (error) => error.name === 'AbortError',
+  );
+  assert.ok(Date.now() - started < 500);
+}));
+
 function withWorkspace(callback) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cheapai-tool-test-'));
-  return Promise.resolve(callback(root)).finally(() => fs.rmSync(root, { recursive: true, force: true }));
+  return Promise.resolve(callback(root)).finally(() => {
+    try {
+      fs.rmSync(root, { recursive: true, force: true });
+    } catch {
+      /* Windows can keep a dying child attached to the temp cwd briefly. */
+    }
+  });
 }

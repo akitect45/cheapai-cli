@@ -7,6 +7,13 @@ import { runProcess, shellInvocation } from './process-runner.js';
 import { createToolRegistry, toToolDefinition } from './tool-contract.js';
 import { buildDiffPayload } from '../ui/diff.js';
 
+function throwIfAborted(signal) {
+  if (!signal?.aborted) return;
+  const error = new Error('The operation was aborted.');
+  error.name = 'AbortError';
+  throw error;
+}
+
 const TOOL_WIRE_SPECS = [
   {
     type: 'function',
@@ -179,10 +186,19 @@ export function createToolRuntime({
     return pathPolicy.resolve(p);
   }
 
-  function readFile(filePath, offset, limit) {
+  function yieldToEventLoop() {
+    return new Promise((resolve) => setImmediate(resolve));
+  }
+
+  async function readFile(filePath, offset, limit) {
     const abs = resolveSafe(filePath);
-    if (!fs.existsSync(abs)) return { error: `File not found: ${abs}` };
-    const text = fs.readFileSync(abs, 'utf8');
+    let text;
+    try {
+      text = await fs.promises.readFile(abs, 'utf8');
+    } catch (error) {
+      if (error?.code === 'ENOENT') return { error: `File not found: ${abs}` };
+      return { error: String(error?.message || error) };
+    }
     const lines = text.split(/\r?\n/);
     const start = Math.max(1, offset || 1);
     const max = limit || 2000;
@@ -279,16 +295,20 @@ export function createToolRuntime({
     return false;
   }
 
-  function walkGlob(startDir, pattern, max_results = 200) {
+  async function walkGlob(startDir, pattern, max_results = 200, signal = null) {
+    throwIfAborted(signal);
     const results = [];
     const base = resolveSafe(startDir || root);
-    function walk(dir) {
-      if (results.length >= max_results) return;
+    const stack = [base];
+    let scanned = 0;
+    while (stack.length && results.length < max_results) {
+      throwIfAborted(signal);
+      const dir = stack.pop();
       let entries;
       try {
-        entries = fs.readdirSync(dir, { withFileTypes: true });
+        entries = await fs.promises.readdir(dir, { withFileTypes: true });
       } catch {
-        return;
+        continue;
       }
       for (const ent of entries) {
         if (results.length >= max_results) break;
@@ -296,27 +316,32 @@ export function createToolRuntime({
         const full = path.join(dir, ent.name);
         const rel = path.relative(base, full).replace(/\\/g, '/');
         if (ent.isDirectory() && !ent.isSymbolicLink()) {
-          walk(full);
+          stack.push(full);
           continue;
         }
         let safeFull;
         try {
           safeFull = resolveSafe(full);
-          if (fs.statSync(safeFull).isDirectory()) continue;
+          const st = await fs.promises.stat(safeFull);
+          if (st.isDirectory()) continue;
         } catch {
           continue;
         }
         if (matchGlob(rel, pattern) || matchGlob(ent.name, pattern)) {
           results.push(safeFull);
         }
+        scanned += 1;
+        if (scanned % 24 === 0) {
+          await yieldToEventLoop();
+          throwIfAborted(signal);
+        }
       }
     }
-    // If pattern has no slash, search basename; if absolute-ish, still from base
-    walk(base);
     return results;
   }
 
-  function grepSearch({ pattern, searchPath, globFilter, max_matches = 50, case_insensitive = false }) {
+  async function grepSearch({ pattern, searchPath, globFilter, max_matches = 50, case_insensitive = false, signal = null }) {
+    throwIfAborted(signal);
     let re;
     try {
       re = new RegExp(pattern, case_insensitive ? 'i' : '');
@@ -337,14 +362,25 @@ export function createToolRuntime({
       files.push(fp);
     }
 
-    if (fs.existsSync(base) && fs.statSync(base).isFile()) {
-      considerFile(base);
-    } else {
-      for (const f of walkGlob(base, '**/*', 5000)) considerFile(f);
+    try {
+      const st = await fs.promises.stat(base);
+      if (st.isFile()) considerFile(base);
+      else {
+        const walked = await walkGlob(base, '**/*', 5000, signal);
+        for (const f of walked) considerFile(f);
+      }
+    } catch (error) {
+      if (error?.name === 'AbortError') throw error;
+      return { matches, truncated: false };
     }
 
-    for (const fp of files) {
+    for (let index = 0; index < files.length; index++) {
       if (matches.length >= max_matches) break;
+      if (index % 8 === 0) {
+        await yieldToEventLoop();
+        throwIfAborted(signal);
+      }
+      const fp = files[index];
       let safePath;
       try {
         safePath = resolveSafe(fp);
@@ -353,7 +389,7 @@ export function createToolRuntime({
       }
       let text;
       try {
-        text = fs.readFileSync(safePath, 'utf8');
+        text = await fs.promises.readFile(safePath, 'utf8');
       } catch {
         continue;
       }
@@ -370,6 +406,8 @@ export function createToolRuntime({
   }
 
   async function executeImplementation(name, args, { signal, operationId, onUpdate, onProcess } = {}) {
+    throwIfAborted(signal);
+    await yieldToEventLoop();
     switch (name) {
       case 'bash':
         onBash?.(args.command);
@@ -392,7 +430,7 @@ export function createToolRuntime({
         return editFile(args.path, args.old_string, args.new_string, !!args.replace_all);
       case 'glob':
         return {
-          files: walkGlob(args.root || root, args.pattern, args.max_results || 200),
+          files: await walkGlob(args.root || root, args.pattern, args.max_results || 200, signal),
         };
       case 'grep':
         return grepSearch({
@@ -401,6 +439,7 @@ export function createToolRuntime({
           globFilter: args.glob,
           max_matches: args.max_matches || 50,
           case_insensitive: !!args.case_insensitive,
+          signal,
         });
       case 'todo_write':
         todos = args.todos || [];
@@ -434,6 +473,7 @@ export function createToolRuntime({
       const result = await validation.tool.execute(context.callId || name, args, context);
       return result === undefined ? { ok: true } : result;
     } catch (error) {
+      if (error?.name === 'AbortError') throw error;
       return { ok: false, error: String(error?.message || error), code: error?.code || 'tool_error' };
     }
   }
@@ -444,6 +484,7 @@ export function createToolRuntime({
     if (name === 'glob') return String(args.pattern || '').trim();
     if (name === 'grep') return `${args.pattern || ''}${args.path ? ` ${args.path}` : ''}`.trim();
     if (name === 'todo_write') return Array.isArray(args.todos) ? `${args.todos.length} task(s)` : '';
+    if (name === 'canvas_write') return String(args.title || args.id || '').trim();
     return `${name} ${JSON.stringify(args).slice(0, 180)}`.trim();
   }
 

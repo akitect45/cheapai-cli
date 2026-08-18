@@ -188,7 +188,7 @@ export function utf8ChildEnvironment(source = process.env) {
  * Official Node builds with full ICU support `euc-kr` / related labels.
  */
 export function decodeConsoleBuffer(buffer, platform = process.platform) {
-  const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || '');
+  const buf = trimIncompleteUtf8(Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || ''));
   if (!buf.length) return '';
   try {
     return new TextDecoder('utf-8', { fatal: true }).decode(buf);
@@ -205,6 +205,30 @@ export function decodeConsoleBuffer(buffer, platform = process.platform) {
     }
   }
   return buf.toString('utf8');
+}
+
+/**
+ * Drop leading UTF-8 continuation bytes and a trailing incomplete sequence
+ * so a byte-capped collector cannot mis-decode Korean as latin-1/CP949.
+ */
+export function trimIncompleteUtf8(buffer) {
+  const buf = Buffer.isBuffer(buffer) ? buffer : Buffer.from(buffer || '');
+  if (!buf.length) return buf;
+  let start = 0;
+  while (start < buf.length && (buf[start] & 0xc0) === 0x80) start += 1;
+  if (start >= buf.length) return buf.subarray(0, 0);
+  let end = buf.length;
+  if ((buf[end - 1] & 0x80) === 0) return buf.subarray(start, end);
+  let seq = end - 1;
+  while (seq > start && (buf[seq] & 0xc0) === 0x80) seq -= 1;
+  const lead = buf[seq];
+  const needed = (lead & 0xe0) === 0xc0 ? 2
+    : (lead & 0xf0) === 0xe0 ? 3
+      : (lead & 0xf8) === 0xf0 ? 4
+        : (lead & 0x80) === 0 ? 1
+          : 0;
+  if (!needed || end - seq < needed) end = seq;
+  return buf.subarray(start, end);
 }
 
 function createBoundedCollector(maxBytes, platform = process.platform) {

@@ -1,11 +1,29 @@
 import { t, icons } from '../ui/theme.js';
 import { selectMenu } from '../ui/select.js';
 
-const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'bash', 'todo_write']);
 const READ_TOOLS = new Set(['read_file', 'glob', 'grep']);
 
+function isReadTool(toolName, sideEffect) {
+  return sideEffect === 'none' || READ_TOOLS.has(toolName);
+}
+
+function isEditTool(toolName) {
+  return toolName === 'write_file' || toolName === 'edit_file' || toolName === 'todo_write';
+}
+
+function autoApproved(mode, toolName, { allowTodo = false, toolResolver = null } = {}) {
+  if (mode === 'yolo') return true;
+  if (mode === 'strict') return false;
+  if (allowTodo && toolName === 'todo_write') return true;
+  const sideEffect = toolResolver?.(toolName)?.sideEffect;
+  if (isReadTool(toolName, sideEffect)) return true;
+  if (mode === 'accept-edits' && isEditTool(toolName)) return true;
+  if (mode === 'auto' && READ_TOOLS.has(toolName)) return true;
+  return false;
+}
+
 /**
- * @param {'ask'|'auto'|'accept-edits'|'yolo'} mode
+ * @param {'ask'|'auto'|'accept-edits'|'yolo'|'strict'} mode
  */
 export function createPermissionGate(mode = 'ask', requestApproval = null, {
   interactive,
@@ -14,34 +32,16 @@ export function createPermissionGate(mode = 'ask', requestApproval = null, {
 } = {}) {
   const m = mode || 'ask';
   const canPrompt = interactive ?? (process.stdin.isTTY && process.stdout.isTTY);
+  const opts = { allowTodo, toolResolver };
 
   return {
     mode: m,
     requiresApproval(toolName) {
-      if (m === 'yolo') return false;
-      const sideEffect = toolResolver?.(toolName)?.sideEffect;
-      if (sideEffect === 'none' || READ_TOOLS.has(toolName)) return false;
-      if (allowTodo && toolName === 'todo_write') return false;
-      if (m === 'accept-edits' && (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'todo_write')) {
-        return false;
-      }
-      return true;
+      return !autoApproved(m, toolName, opts);
     },
     async approve(toolName, detail, { signal = null } = {}) {
       if (signal?.aborted) return false;
-      if (m === 'yolo') return true;
-      const sideEffect = toolResolver?.(toolName)?.sideEffect;
-      if (sideEffect === 'none' || READ_TOOLS.has(toolName)) return true;
-      if (allowTodo && toolName === 'todo_write') return true;
-      if (m === 'accept-edits' && (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'todo_write')) {
-        return true;
-      }
-      if (m === 'auto' && READ_TOOLS.has(toolName)) return true;
-      // ask / auto for write tools
-      if (!WRITE_TOOLS.has(toolName) && !READ_TOOLS.has(toolName)) {
-        // unknown tools: ask unless yolo
-        if (m === 'yolo') return true;
-      }
+      if (autoApproved(m, toolName, opts)) return true;
       const pending = requestApproval
         ? requestApproval(toolName, detail, { signal })
         : askUser(toolName, detail, canPrompt);

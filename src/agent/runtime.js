@@ -17,6 +17,12 @@ import { parseToolArguments } from './tool-contract.js';
 
 const GOAL_TOOL_NAMES = new Set(['read_file', 'glob', 'grep', 'todo_write']);
 
+function yieldToEventLoop() {
+  return new Promise((resolve) => {
+    setImmediate(() => setImmediate(resolve));
+  });
+}
+
 export function createAgentRuntime(options = {}) {
   const {
     client,
@@ -40,6 +46,7 @@ export function createAgentRuntime(options = {}) {
     maxRetries = DEFAULT_PROVIDER_MAX_RETRIES,
     maxTokens = 0,
     timeBudgetMs = 0,
+    streamIdleTimeoutMs,
     customTools = [],
     eventHooks = null,
   } = options;
@@ -166,12 +173,13 @@ export function createAgentRuntime(options = {}) {
           const stream = await streamTurnWithRetries({
             client,
             model: session.model || model,
-            messages: session.messages,
+            messages: toProviderMessages(session.messages),
             tools: runtime.registry.definitions((tool) => !goalMode || GOAL_TOOL_NAMES.has(tool.name)),
             temperature,
             reasoningEffort,
             signal: runSignal,
             maxRetries,
+            idleTimeoutMs: Number(streamIdleTimeoutMs) > 0 ? Number(streamIdleTimeoutMs) : undefined,
             print,
             ui,
             emit,
@@ -199,14 +207,19 @@ export function createAgentRuntime(options = {}) {
           if (maxTokens > 0 && totalUsage.total_tokens >= maxTokens) {
             finalText = '(token budget reached)';
             if (!messageOpen) emit('message_start', { role: 'assistant' }, { turnId });
-            appendAssistant(session, finalText, 'budget');
+            appendAssistant(session, finalText, 'budget', result.thinking);
             emit('message_end', { role: 'assistant', content: finalText, status: 'budget' }, { turnId });
             emit('turn_end', { turn, status: 'budget' }, { turnId });
             break;
           }
 
           if (result.tool_calls?.length) {
-            session.messages.push({ role: 'assistant', content: result.content || null, tool_calls: result.tool_calls });
+            session.messages.push({
+              role: 'assistant',
+              content: result.content || null,
+              tool_calls: result.tool_calls,
+              ...(result.thinking ? { cheapai_thinking: String(result.thinking).slice(0, 80_000) } : {}),
+            });
             saveSession(session);
             if (!startedAssistant) {
               startedAssistant = true;
@@ -259,7 +272,7 @@ export function createAgentRuntime(options = {}) {
             startedAssistant = true;
             emit('message_start', { role: 'assistant' }, { turnId });
           }
-          appendAssistant(session, finalText, 'completed');
+          appendAssistant(session, finalText, 'completed', result.thinking);
           emit('message_end', { role: 'assistant', content: finalText }, { turnId });
           if (renderedAssistant) {
             ui?.onAssistantEnd?.();
@@ -436,6 +449,7 @@ async function executeToolBatch({
     emitEvent('tool_start', { name, detail }, { turnId });
     ui?.onToolStart?.(name, detail, meta);
     if (!ui?.onToolStart && !print) console.log(`\x1b[33m\n● ${name} · running\x1b[0m`);
+    await yieldToEventLoop();
     let result;
     let status = 'ok';
     try {
@@ -455,7 +469,11 @@ async function executeToolBatch({
         else journal.fail(operationId, result);
       }
     } catch (caught) {
-      result = { error: String(caught?.message || caught), code: caught?.code || 'tool_error' };
+      result = {
+        error: String(caught?.message || caught),
+        code: caught?.name === 'AbortError' || runSignal.aborted ? 'aborted' : (caught?.code || 'tool_error'),
+        aborted: caught?.name === 'AbortError' || runSignal.aborted,
+      };
       status = 'error';
       if (tool.sideEffect !== 'none') journal.fail(operationId, result);
     }
@@ -465,6 +483,7 @@ async function executeToolBatch({
       const mark = status === 'ok' ? '\x1b[32m  ✓ done\x1b[0m' : '\x1b[33m  · done\x1b[0m';
       console.log(mark);
     }
+    if (result?.aborted || runSignal.aborted) throw abortError();
     return { call, result, status };
   }
 }
@@ -474,9 +493,21 @@ function addQueuedMessages(session, values, source) {
   if (values.length) saveSession(session);
 }
 
-function appendAssistant(session, content, status) {
-  session.messages.push({ role: 'assistant', content, cheapai_status: status });
+function appendAssistant(session, content, status, thinking) {
+  const message = { role: 'assistant', content, cheapai_status: status };
+  if (thinking) message.cheapai_thinking = String(thinking).slice(0, 80_000);
+  session.messages.push(message);
   saveSession(session);
+}
+
+function toProviderMessages(messages) {
+  return (messages || []).map((message) => {
+    const next = { role: message.role, content: message.content };
+    if (message.tool_calls) next.tool_calls = message.tool_calls;
+    if (message.tool_call_id) next.tool_call_id = message.tool_call_id;
+    if (message.name) next.name = message.name;
+    return next;
+  });
 }
 
 function reconcileUncertainOperations(session, records) {
@@ -531,6 +562,7 @@ async function streamTurnWithRetries({
   reasoningEffort,
   signal,
   maxRetries,
+  idleTimeoutMs,
   print,
   ui,
   emit,
@@ -551,6 +583,7 @@ async function streamTurnWithRetries({
         reasoningEffort,
         signal,
         maxRetries,
+        idleTimeoutMs,
         onRetry: ({ attempt: providerAttempt, maxRetries: budget, waitMs, classification }) => {
           const seconds = Math.max(1, Math.ceil((waitMs || 0) / 1000));
           const kind = classification?.category === 'rate_limit'
@@ -581,7 +614,7 @@ async function streamTurnWithRetries({
       });
       return { result, startedAssistant, renderedAssistant };
     } catch (error) {
-      if (signal?.aborted || error?.name === 'AbortError') throw error;
+      if (signal?.aborted || error?.name === 'AbortError' || error?.code === 'stream_idle_timeout') throw error;
       // Non-partial failures are already retried inside the provider stream().
       if (!error?.partialOutput || !isRetryableProviderError(error) || attempt >= retryBudget) throw error;
 
