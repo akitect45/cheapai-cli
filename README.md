@@ -127,12 +127,13 @@ cheapai --agent reviewer
 | `/thinking` | 추론 표시 전환 |
 | `/details` | 도구 실행 상세 정보 전환 |
 | `/goal [on|off]` | 읽기·검색 기반 목표 계획 모드 |
+| `/docs [on|off]` | `docs/` 프로젝트 문서 모드 |
 | `/rename <title>` | 현재 세션 이름 변경 |
 | `/export [path]` | Markdown transcript 내보내기 |
 
 ## 도구
 
-`bash` · `read_file` · `write_file` · `edit_file` · `glob` · `grep` · `todo_write`
+`bash` · `read_file` · `write_file` · `edit_file` · `glob` · `grep` · `todo_write` · `git` · `web_fetch` · `ask_question` · `task` · `project_docs` · `skill` · `mcp_manage` · `list_mcp_tools` · `call_mcp_tool`
 
 프로젝트 지침: `CHEAPAI.md` / `AGENTS.md` / `CLAUDE.md`
 

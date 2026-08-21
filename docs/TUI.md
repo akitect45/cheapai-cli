@@ -104,7 +104,8 @@ CLI 프로세스가 종료될 때까지 유지됩니다. 설정 파일에 영구
 | `yolo` | 자동 허용 | 자동 허용 | 자동 허용 |
 
 현재 도구 목록은 `bash`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`,
-`todo_write`입니다. `ask` 모드에서 승인하지 않은 도구 호출도 모델 대화에는
+`todo_write`, `git`, `web_fetch`, `ask_question`, `task`, `project_docs`,
+`skill`, `mcp_manage`, `list_mcp_tools`, `call_mcp_tool`입니다. `ask` 모드에서 승인하지 않은 도구 호출도 모델 대화에는
 `denied` 결과로 기록되어 에이전트가 다음 응답에서 처리할 수 있습니다.
 
 권한은 다음 방법으로 변경할 수 있습니다.
@@ -151,6 +152,7 @@ Agent profile은 `.opencode/agents/*.md`, `.cheapai/agents/*.md`,
 | `/thinking` | reasoning 표시 전환 |
 | `/details` | 도구 실행 상세 정보 전환 |
 | `/goal [on|off]` | 목표·완료 기준·실행 계획을 만드는 계획 전용 모드 |
+| `/docs [on|off]` | `docs/` 프로젝트 문서 모드 |
 | `/rename <title>` | 현재 세션 제목 변경 |
 | `/export [path]` | 세션을 Markdown transcript로 저장. 경로 생략 시 `~/.cheapai/exports/` |
 | `/ask` | 쓰기 도구 승인 요청 모드 |

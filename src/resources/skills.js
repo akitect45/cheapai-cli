@@ -5,7 +5,7 @@ import { resourceRoots } from './commands.js';
 const MAX_SKILL_BYTES = 40_000;
 const MAX_TOTAL_BYTES = 120_000;
 
-export function discoverSkills(cwd = process.cwd()) {
+export function discoverSkills(cwd = process.cwd(), { includeDisabled = false } = {}) {
   const roots = resourceRoots(cwd, 'skills');
   const seen = new Set();
   const skills = [];
@@ -26,12 +26,14 @@ export function discoverSkills(cwd = process.cwd()) {
       try {
         const source = fs.readFileSync(filePath, 'utf8');
         const parsed = parseSkill(source);
+        if (parsed.enabled === false && !includeDisabled) continue;
         const body = parsed.body.slice(0, MAX_SKILL_BYTES);
         if (total + body.length > MAX_TOTAL_BYTES) continue;
         skills.push({
-          name: normalized,
+          name: parsed.name || normalized,
           description: parsed.description || `skill ${normalized}`,
           body,
+          enabled: parsed.enabled !== false,
           path: filePath,
           scope,
           provenance: root,
@@ -46,13 +48,18 @@ export function discoverSkills(cwd = process.cwd()) {
   return skills;
 }
 
-function parseSkill(source) {
+export function parseSkill(source) {
   const text = String(source || '').trim();
   const frontmatter = text.match(/^---\s*\n([\s\S]*?)\n---\s*\n?/);
-  if (!frontmatter) return { description: '', body: text };
-  const descriptionLine = frontmatter[1].split(/\r?\n/).find((line) => /^description\s*:/i.test(line));
+  if (!frontmatter) return { name: '', description: '', enabled: true, body: text };
+  const fields = Object.fromEntries(frontmatter[1].split(/\r?\n/).flatMap((line) => {
+    const match = line.match(/^([A-Za-z0-9_-]+)\s*:\s*(.*)$/);
+    return match ? [[match[1].toLowerCase(), match[2].trim().replace(/^['"]|['"]$/g, '')]] : [];
+  }));
   return {
-    description: descriptionLine ? descriptionLine.replace(/^description\s*:/i, '').trim() : '',
+    name: String(fields.name || '').trim().toLowerCase(),
+    description: fields.description || '',
+    enabled: !/^(false|0|off|no)$/i.test(String(fields.enabled || 'true')),
     body: text.slice(frontmatter[0].length),
   };
 }

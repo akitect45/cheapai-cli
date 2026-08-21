@@ -64,6 +64,8 @@ import {
 import { redoTurn, undoTurn } from '../agent/history.js';
 import { formatUpdateNotice } from '../update.js';
 import { loadExtensions } from '../resources/extensions.js';
+import { createMcpManager } from '../agent/mcp.js';
+import { suggestFollowups } from '../agent/followups.js';
 
 /**
  * Append-only interactive chat for a focused coding workspace.
@@ -132,6 +134,21 @@ export async function startChatTui({
     return customAgents.find((agent) => agent.name === agentName)?.instructions || '';
   }
 
+  const mcpManager = createMcpManager({ cwd, servers: cfg.mcpServers });
+
+  function promptExtras() {
+    return {
+      cwd,
+      model,
+      goalMode,
+      agentInstructions: agentInstructions(),
+      defaultRules: cfg.defaultRules || '',
+      mcpCatalog: mcpManager.promptCatalog(),
+      projectDocs: cfg.projectDocs === true,
+      session,
+    };
+  }
+
   function persistSession() {
     if (!session || !sessionPersisted) return;
     saveSession(session);
@@ -142,7 +159,7 @@ export async function startChatTui({
     session = createSession({
       cwd,
       model,
-      systemPrompt: buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() }),
+      systemPrompt: buildSystemPrompt(promptExtras()),
     });
     session.goalMode = goalMode;
     session.agent = agentName;
@@ -155,7 +172,7 @@ export async function startChatTui({
     session.agent = agentName;
     if (opts.title) session.title = String(opts.title).trim().slice(0, 80);
     if (session.messages?.[0]?.role === 'system') {
-      session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() });
+      session.messages[0].content = buildSystemPrompt(promptExtras());
     }
     persistSession();
   }
@@ -358,6 +375,10 @@ export async function startChatTui({
       eventHooks: extensionRuntime.hooks,
       pathMode: permissionMode === 'yolo' ? 'unrestricted' : cfg.pathMode || 'workspace',
       extraRoots: Array.isArray(cfg.extraRoots) ? cfg.extraRoots : [],
+      mcp: mcpManager,
+      mcpServers: cfg.mcpServers,
+      maxSubagentTurns: cfg.maxSubagentTurns || 40,
+      projectDocs: cfg.projectDocs === true,
     });
     activeRuntime = runtime;
     try {
@@ -367,6 +388,14 @@ export async function startChatTui({
       }
       if (!print && showBalance) void refreshAccountUsage();
       if (!print) ui.sessionTitle = session.title;
+      if (!print && cfg.followupSuggestions !== false && result.text) {
+        void suggestFollowups({
+          client,
+          model: cfg.followupModel || 'gpt-5.6-sol',
+          userPrompt: text,
+          assistantAnswer: result.text,
+        }).then((follow) => ui.setFollowups?.(follow.suggestions)).catch(() => {});
+      }
       return result;
     } finally {
       activeRuntime = null;
@@ -489,7 +518,7 @@ export async function startChatTui({
       goalMode = !!next.goalMode;
       contextWindow = Number(next.contextWindow) || null;
       if (next.messages?.[0]?.role === 'system') {
-        next.messages[0].content = buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() });
+        next.messages[0].content = buildSystemPrompt(promptExtras());
       }
       ui.model = model;
       ui.setAgent?.(agentName);
@@ -532,7 +561,7 @@ export async function startChatTui({
         ui.setContextWindow?.(null);
         persistModel(value);
         if (session.messages?.[0]?.role === 'system') {
-          session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() });
+          session.messages[0].content = buildSystemPrompt(promptExtras());
         }
         persistSession();
         refreshClient();
@@ -593,7 +622,7 @@ export async function startChatTui({
         agentName = normalized;
         session.agent = agentName;
         if (session.messages?.[0]?.role === 'system') {
-          session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() });
+          session.messages[0].content = buildSystemPrompt(promptExtras());
         }
         persistSession();
         ui.setAgent?.(agentName);
@@ -613,11 +642,25 @@ export async function startChatTui({
         goalMode = !!value;
         session.goalMode = goalMode;
         if (session.messages?.[0]?.role === 'system') {
-          session.messages[0].content = buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() });
+          session.messages[0].content = buildSystemPrompt(promptExtras());
         }
         persistSession();
         ui.setGoalMode?.(goalMode);
         ui.writeContext(`goal mode ${goalMode ? 'on · plan only' : 'off'}`);
+      },
+      get projectDocs() {
+        return cfg.projectDocs === true;
+      },
+      set projectDocs(value) {
+        cfg.projectDocs = !!value;
+        const config = loadConfig();
+        config.projectDocs = cfg.projectDocs;
+        saveConfig(config);
+        if (session.messages?.[0]?.role === 'system') {
+          session.messages[0].content = buildSystemPrompt(promptExtras());
+        }
+        persistSession();
+        ui.writeContext(`project docs ${cfg.projectDocs ? 'on' : 'off'}`);
       },
       cwd,
       get client() {
@@ -630,7 +673,7 @@ export async function startChatTui({
         const next = createSession({
           cwd,
           model,
-          systemPrompt: buildSystemPrompt({ cwd, model, goalMode, agentInstructions: agentInstructions() }),
+          systemPrompt: buildSystemPrompt(promptExtras()),
         });
         session = next;
         session.goalMode = false;
@@ -805,6 +848,16 @@ export async function handleSlash(line, ctx) {
       return true;
     }
     ctx.goalMode = value ? value === 'on' : !ctx.goalMode;
+    return true;
+  }
+
+  if (c === 'docs' || c === 'project-docs') {
+    const value = arg.toLowerCase();
+    if (value && !['on', 'off'].includes(value)) {
+      notify(ctx, 'Use /docs, /docs on, or /docs off.', 'error');
+      return true;
+    }
+    ctx.projectDocs = value ? value === 'on' : !ctx.projectDocs;
     return true;
   }
 
@@ -1173,6 +1226,10 @@ export async function handleSlash(line, ctx) {
       ['auto compact', config.autoCompact === false ? 'off' : 'on'],
       ['compact threshold', config.compactThreshold],
       ['max turns', config.maxTurns === 0 ? 'unlimited (0)' : config.maxTurns],
+      ['project docs', config.projectDocs ? 'on' : 'off'],
+      ['follow-ups', config.followupSuggestions === false ? 'off' : 'on'],
+      ['default rules', config.defaultRules ? 'set' : 'none'],
+      ['mcp servers', Object.keys(config.mcpServers || {}).length],
       ['base URL', config.baseUrl],
     ]);
     return true;
@@ -1206,6 +1263,7 @@ function printHelp() {
   /thinking             toggle reasoning display
   /details              toggle tool execution details
   /goal [on|off]        plan goals without writes or shell
+  /docs [on|off]        project documentation mode
   /rename <title>       rename the current session
   /export [path]        export the transcript as Markdown
   /yolo                 toggle auto-approve tools
@@ -1241,6 +1299,7 @@ function showHelp(ctx) {
     ['/thinking', 'toggle reasoning display'],
     ['/details', 'toggle tool details'],
     ['/goal', 'plan goals without writes'],
+    ['/docs', 'toggle project documentation mode'],
     ['/rename', 'rename the current session'],
     ['/export', 'write a Markdown transcript'],
     ['/ask', 'ask before writes'],
@@ -1463,6 +1522,18 @@ function createChatUi({ model, mode, effort, goalMode, cwd, user, sessionId, pri
         const active = todos.filter((todo) => todo.status === 'in_progress').length;
         const done = todos.filter((todo) => todo.status === 'completed').length;
         console.log(t.dim(`  ☷ tasks  ${done}/${todos.length} complete${active ? `  ·  ${active} active` : ''}`));
+      },
+      onSubagent({ title, status, detail }) {
+        console.log(t.dim(`  ▸ ${title || 'subagent'}  ${status}${detail ? ` · ${detail}` : ''}`));
+      },
+      async askQuestion(prompt, options) {
+        const picked = await selectMenu({
+          title: prompt,
+          options: options.map((option) => ({ label: option.label, action: option.id })),
+          footer: '↑/↓ move  Enter select  Esc cancel',
+        });
+        if (!picked) return null;
+        return options.find((option) => option.id === picked.action) || null;
       },
       onNotice(text, tone) {
         const paint = tone === 'warning' ? t.yellow : tone === 'error' ? t.red : t.dim;

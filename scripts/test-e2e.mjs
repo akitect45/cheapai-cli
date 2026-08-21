@@ -621,9 +621,14 @@ console.log('cheapai e2e\n');
     input: '/',
   });
   const slashFrame = slashUi.renderSnapshot(80, 24);
-  if (!slashFrame.includes('/help') || !slashFrame.includes('/status')) {
+  if (!slashFrame.includes('/help') || !slashFrame.includes('/status') || !slashFrame.includes('Tab complete')) {
     bad('slash command suggestions', new Error('dropdown suggestions missing'));
   } else ok('slash command suggestions');
+  slashUi.pressKey('\x1b[B');
+  slashUi.pressKey('\t');
+  if (slashUi.input !== '/status') {
+    bad('slash command tab complete', new Error(`completed ${JSON.stringify(slashUi.input)}`));
+  } else ok('slash command tab complete');
 
   const extensionUi = createFullscreenChatUi({
     model: 'claude-sonnet-5',

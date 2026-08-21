@@ -1,8 +1,11 @@
 import { t, icons } from '../ui/theme.js';
 import { selectMenu } from '../ui/select.js';
+import { isGitMutating } from './git.js';
+import { isMcpMutating } from './mcp.js';
+import { isSkillMutating } from './skill-store.js';
 
-const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'bash', 'todo_write']);
-const READ_TOOLS = new Set(['read_file', 'glob', 'grep']);
+const WRITE_TOOLS = new Set(['write_file', 'edit_file', 'bash', 'todo_write', 'git', 'call_mcp_tool']);
+const READ_TOOLS = new Set(['read_file', 'glob', 'grep', 'web_fetch', 'ask_question', 'project_docs', 'list_mcp_tools', 'task']);
 
 /**
  * @param {'ask'|'auto'|'accept-edits'|'yolo'} mode
@@ -15,33 +18,30 @@ export function createPermissionGate(mode = 'ask', requestApproval = null, {
   const m = mode || 'ask';
   const canPrompt = interactive ?? (process.stdin.isTTY && process.stdout.isTTY);
 
+  function allowedWithoutPrompt(toolName, args = {}) {
+    if (m === 'yolo') return true;
+    if (toolName === 'web_fetch' || toolName === 'ask_question' || toolName === 'task' || toolName === 'project_docs' || toolName === 'list_mcp_tools') return true;
+    if (toolName === 'git') return !isGitMutating(args.action);
+    if (toolName === 'skill') return !isSkillMutating(args.action);
+    if (toolName === 'mcp_manage') return !isMcpMutating(toolName, args);
+    const sideEffect = toolResolver?.(toolName)?.sideEffect;
+    if (sideEffect === 'none' || READ_TOOLS.has(toolName)) return true;
+    if (allowTodo && toolName === 'todo_write') return true;
+    if (m === 'accept-edits' && (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'todo_write')) {
+      return true;
+    }
+    if (m === 'auto' && READ_TOOLS.has(toolName)) return true;
+    return false;
+  }
+
   return {
     mode: m,
-    requiresApproval(toolName) {
-      if (m === 'yolo') return false;
-      const sideEffect = toolResolver?.(toolName)?.sideEffect;
-      if (sideEffect === 'none' || READ_TOOLS.has(toolName)) return false;
-      if (allowTodo && toolName === 'todo_write') return false;
-      if (m === 'accept-edits' && (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'todo_write')) {
-        return false;
-      }
-      return true;
+    requiresApproval(toolName, args = {}) {
+      return !allowedWithoutPrompt(toolName, args);
     },
-    async approve(toolName, detail, { signal = null } = {}) {
+    async approve(toolName, detail, { signal = null, args = {} } = {}) {
       if (signal?.aborted) return false;
-      if (m === 'yolo') return true;
-      const sideEffect = toolResolver?.(toolName)?.sideEffect;
-      if (sideEffect === 'none' || READ_TOOLS.has(toolName)) return true;
-      if (allowTodo && toolName === 'todo_write') return true;
-      if (m === 'accept-edits' && (toolName === 'write_file' || toolName === 'edit_file' || toolName === 'todo_write')) {
-        return true;
-      }
-      if (m === 'auto' && READ_TOOLS.has(toolName)) return true;
-      // ask / auto for write tools
-      if (!WRITE_TOOLS.has(toolName) && !READ_TOOLS.has(toolName)) {
-        // unknown tools: ask unless yolo
-        if (m === 'yolo') return true;
-      }
+      if (allowedWithoutPrompt(toolName, args)) return true;
       const pending = requestApproval
         ? requestApproval(toolName, detail, { signal })
         : askUser(toolName, detail, canPrompt);
@@ -104,5 +104,9 @@ async function askUser(toolName, detail, interactive) {
 }
 
 function toolLabel(name) {
-  return ({ bash: 'Bash', write_file: 'Write', edit_file: 'Edit', todo_write: 'Tasks' })[name] || name;
+  return ({
+    bash: 'Bash', write_file: 'Write', edit_file: 'Edit', todo_write: 'Tasks',
+    git: 'Git', web_fetch: 'Fetch', ask_question: 'Ask', task: 'Task',
+    project_docs: 'Docs', skill: 'Skill', mcp_manage: 'MCP', list_mcp_tools: 'MCP', call_mcp_tool: 'MCP',
+  })[name] || name;
 }

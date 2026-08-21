@@ -6,6 +6,18 @@ import { createPathPolicy } from './path-policy.js';
 import { runProcess, shellInvocation } from './process-runner.js';
 import { createToolRegistry, toToolDefinition } from './tool-contract.js';
 import { buildDiffPayload } from '../ui/diff.js';
+import { fetchUrl } from './web-fetch.js';
+import { isGitMutating, runGitTool } from './git.js';
+import { handleProjectDocs } from './project-docs.js';
+import { isSkillMutating, manageSkill } from './skill-store.js';
+import { isMcpMutating } from './mcp.js';
+
+export { isGitMutating, isSkillMutating, isMcpMutating };
+export const GOAL_TOOL_NAMES = new Set([
+  'read_file', 'glob', 'grep', 'todo_write', 'web_fetch', 'git',
+  'ask_question', 'project_docs', 'skill', 'list_mcp_tools',
+]);
+export const PARENT_ONLY_TOOLS = new Set(['task', 'ask_question']);
 
 const TOOL_WIRE_SPECS = [
   {
@@ -13,7 +25,7 @@ const TOOL_WIRE_SPECS = [
     function: {
       name: 'bash',
       description:
-        'Run a shell command in the session working directory. Use for git, npm/pnpm, builds, tests, moving/renaming files, directory listing. Do NOT use bash to read/edit large source files — use read_file/edit_file/write_file instead. On Windows this runs via cmd.exe /c.',
+        'Run a shell command in the session working directory. Use for npm/pnpm, builds, tests, moving/renaming files, directory listing. Prefer the git tool for repository status/diff/log/stage/commit/checkout instead of bash git. Do NOT use bash to read/edit large source files — use read_file/edit_file/write_file instead. On Windows this runs via cmd.exe /c.',
       parameters: {
         type: 'object',
         properties: {
@@ -140,6 +152,170 @@ const TOOL_WIRE_SPECS = [
       },
     },
   },
+  {
+    type: 'function',
+    function: {
+      name: 'git',
+      description:
+        'Git operations in the workspace repository. Use status/diff/log/branch to inspect. Use stage/unstage/commit/checkout/discard/push/pull to change the repo. Prefer this over bash git. Only force-push when the user explicitly asks; force-push uses --force-with-lease unless lease=false.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: {
+            type: 'string',
+            enum: ['status', 'diff', 'log', 'stage', 'unstage', 'commit', 'discard', 'branch', 'checkout', 'push', 'pull', 'force-push'],
+          },
+          path: { type: 'string', description: 'File path for diff' },
+          paths: { type: 'array', items: { type: 'string' }, description: 'Paths for stage/unstage/commit/discard' },
+          message: { type: 'string', description: 'Commit message' },
+          staged: { type: 'boolean', description: 'If true, git diff --cached' },
+          limit: { type: 'integer', description: 'Log entry count (default 20)' },
+          ref: { type: 'string', description: 'Branch or ref for checkout/push/pull' },
+          create: { type: 'boolean', description: 'Create branch on checkout' },
+          remote: { type: 'string', description: 'Remote name (default origin)' },
+          force: { type: 'boolean', description: 'Force push (prefer force-push action)' },
+          lease: { type: 'boolean', description: 'Use --force-with-lease (default true)' },
+          rebase: { type: 'boolean', description: 'git pull --rebase instead of --ff-only' },
+        },
+        required: ['action'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'web_fetch',
+      description:
+        'Fetch a URL on this user\'s machine and return readable text. Use when the user pastes a link to read, or you need a docs/changelog page. This does NOT go through CheapAI servers. http(s) only. Prefer this over asking the user to paste the page.',
+      parameters: {
+        type: 'object',
+        properties: {
+          url: { type: 'string', description: 'http(s) URL to fetch locally' },
+        },
+        required: ['url'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'ask_question',
+      description:
+        'Show a multiple-choice prompt and wait for the user\'s pick. Use this whenever the user must choose between approaches, scope, or next steps. Do NOT ask them to type 1 or 2 in chat. Provide 2–6 short option labels. Continue only after this tool returns the selected id/label.',
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string', description: 'Short question shown above the choices' },
+          options: {
+            type: 'array',
+            minItems: 2,
+            maxItems: 8,
+          },
+        },
+        required: ['prompt', 'options'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'task',
+      description:
+        'Launch a focused subagent for one independent part of a large job. Use when the request is big enough to split into parallel workstreams. Multiple task calls in the SAME turn run in parallel. Give a self-contained prompt. Do not use for a tiny single-file edit. Subagents cannot spawn more subagents.',
+      parameters: {
+        type: 'object',
+        properties: {
+          prompt: { type: 'string', description: 'Self-contained instructions for the subagent.' },
+          title: { type: 'string', description: 'Short dashboard label.' },
+          description: { type: 'string', description: 'Optional one-line summary.' },
+        },
+        required: ['prompt'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'project_docs',
+      description:
+        'Project documentation mode helper. status lists docs/*.md. resolve_conflict asks whether code or docs is the source of truth when they disagree. Use resolve_conflict BEFORE editing if docs and code conflict.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['status', 'resolve_conflict'] },
+          summary: { type: 'string', description: 'Short description of the mismatch' },
+        },
+        required: ['action'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'skill',
+      description:
+        'Create, list, update, enable, disable, delete, or import CheapAI skills. Skills are SKILL.md files. Use this when the user asks to make or save a reusable agent skill. name + instructions are required to create. action=import copies skills from Cursor/Claude/Codex.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['list', 'get', 'create', 'register', 'update', 'enable', 'disable', 'delete', 'import'] },
+          id: { type: 'string' },
+          name: { type: 'string' },
+          names: { type: 'array', items: { type: 'string' } },
+          description: { type: 'string' },
+          instructions: { type: 'string' },
+          enabled: { type: 'boolean' },
+        },
+        required: ['action'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'mcp_manage',
+      description:
+        'Add, list, or remove MCP servers on this machine. catalog lists builtin servers (github, linear, notion, ...). connect accepts catalog_id or a remote url, or stdio command+args. After connect, use list_mcp_tools / call_mcp_tool.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['catalog', 'list', 'connect', 'disconnect'] },
+          catalog_id: { type: 'string' },
+          name: { type: 'string' },
+          url: { type: 'string' },
+          transport: { type: 'string', enum: ['http', 'sse', 'stdio'] },
+          command: { type: 'string' },
+          args: { type: 'array', items: { type: 'string' } },
+          pat: { type: 'string' },
+        },
+        required: ['action'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_mcp_tools',
+      description: 'List connected MCP servers and their tools. Call this before call_mcp_tool if you are unsure which servers are available.',
+      parameters: { type: 'object', properties: {} },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'call_mcp_tool',
+      description: 'Call a tool on a connected MCP server. Use list_mcp_tools first. Arguments must match the tool\'s input schema.',
+      parameters: {
+        type: 'object',
+        properties: {
+          server: { type: 'string' },
+          tool: { type: 'string' },
+          arguments: { type: 'object' },
+        },
+        required: ['server', 'tool'],
+      },
+    },
+  },
 ];
 
 const TOOL_POLICIES = {
@@ -150,6 +326,15 @@ const TOOL_POLICIES = {
   glob: { execution: 'parallel', sideEffect: 'none' },
   grep: { execution: 'parallel', sideEffect: 'none' },
   todo_write: { execution: 'sequential', sideEffect: 'none' },
+  git: { execution: 'sequential', sideEffect: 'process' },
+  web_fetch: { execution: 'parallel', sideEffect: 'network' },
+  ask_question: { execution: 'sequential', sideEffect: 'none' },
+  task: { execution: 'parallel', sideEffect: 'process' },
+  project_docs: { execution: 'parallel', sideEffect: 'none' },
+  skill: { execution: 'sequential', sideEffect: 'none' },
+  mcp_manage: { execution: 'sequential', sideEffect: 'process' },
+  list_mcp_tools: { execution: 'parallel', sideEffect: 'none' },
+  call_mcp_tool: { execution: 'sequential', sideEffect: 'process' },
 };
 
 export const BUILTIN_TOOL_SPECS = TOOL_WIRE_SPECS.map((definition) => ({
@@ -170,6 +355,9 @@ export function createToolRuntime({
   pathMode = 'workspace',
   extraRoots = [],
   customTools = [],
+  mcp = null,
+  session = null,
+  includeParentTools = true,
 } = {}) {
   const root = path.resolve(cwd || process.cwd());
   const pathPolicy = createPathPolicy({ cwd: root, mode: pathMode, extraRoots });
@@ -406,17 +594,42 @@ export function createToolRuntime({
         todos = args.todos || [];
         onTodo?.(todos);
         return { ok: true, todos };
+      case 'git':
+        return runGitTool({
+          cwd: pathPolicy.workspace,
+          args,
+          resolvePath: (filePath) => resolveSafe(filePath),
+          signal,
+        });
+      case 'web_fetch':
+        return fetchUrl(args.url, { userAgent: 'CheapAI-CLI' });
+      case 'ask_question':
+        return { error: 'ask_question must be handled by the agent runtime' };
+      case 'task':
+        return { error: 'task must be launched by the parent agent runtime' };
+      case 'project_docs':
+        return handleProjectDocs(args, root, session || {});
+      case 'skill':
+        return manageSkill(args, root);
+      case 'list_mcp_tools':
+        return mcp ? mcp.listTools() : { servers: [] };
+      case 'call_mcp_tool':
+        return mcp ? mcp.callTool(args) : { error: 'No MCP manager' };
+      case 'mcp_manage':
+        return mcp ? mcp.manage(args) : { error: 'No MCP manager' };
       default:
         return { error: `Unknown tool: ${name}` };
     }
   }
 
-  const builtinContracts = BUILTIN_TOOL_SPECS.map((spec) => ({
-    ...spec,
-    execute(callId, args, context) {
-      return executeImplementation(spec.name, args, { ...context, operationId: callId });
-    },
-  }));
+  const builtinContracts = BUILTIN_TOOL_SPECS
+    .filter((spec) => includeParentTools || !PARENT_ONLY_TOOLS.has(spec.name))
+    .map((spec) => ({
+      ...spec,
+      execute(callId, args, context) {
+        return executeImplementation(spec.name, args, { ...context, operationId: callId });
+      },
+    }));
   const extensionContracts = customTools.map((tool) => ({
     execution: 'sequential',
     sideEffect: 'none',
@@ -444,6 +657,18 @@ export function createToolRuntime({
     if (name === 'glob') return String(args.pattern || '').trim();
     if (name === 'grep') return `${args.pattern || ''}${args.path ? ` ${args.path}` : ''}`.trim();
     if (name === 'todo_write') return Array.isArray(args.todos) ? `${args.todos.length} task(s)` : '';
+    if (name === 'git') {
+      const extra = args.message || args.path || args.ref || '';
+      return `git ${args.action || 'status'} ${extra}`.trim();
+    }
+    if (name === 'web_fetch') return String(args.url || '').trim();
+    if (name === 'task') return String(args.title || args.prompt || 'subagent').split('\n').find((line) => line.trim())?.slice(0, 80) || 'subagent';
+    if (name === 'ask_question') return String(args.prompt || args.title || 'choice');
+    if (name === 'project_docs') return String(args.action || 'status');
+    if (name === 'skill') return `skill ${args.action || 'list'} ${args.name || args.id || ''}`.trim();
+    if (name === 'mcp_manage') return `mcp ${args.action || 'list'} ${args.name || args.url || args.catalog_id || ''}`.trim();
+    if (name === 'call_mcp_tool') return `${args.server || ''}/${args.tool || ''}`;
+    if (name === 'list_mcp_tools') return 'MCP tools';
     return `${name} ${JSON.stringify(args).slice(0, 180)}`.trim();
   }
 

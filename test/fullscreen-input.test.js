@@ -49,3 +49,24 @@ test('repeated identical snapshots stay byte-identical (dirty paint safety)', ()
   const b = ui.renderSnapshot(100, 30);
   assert.equal(a, b);
 });
+
+test('slash command arrows then Tab complete the highlighted command', () => {
+  const ui = makeUi('/');
+  const before = ui.renderSnapshot(80, 24);
+  assert.ok(before.includes('/help'));
+  assert.ok(before.includes('Tab complete'));
+  ui.pressKey('\x1b[B');
+  ui.pressKey('\t');
+  assert.equal(ui.input, '/status');
+  assert.equal(ui.focus, 'prompt');
+});
+
+test('Tab without a slash suggestion still toggles scrollback focus', () => {
+  const ui = makeUi('hello');
+  assert.equal(ui.focus, 'prompt');
+  ui.pressKey('\t');
+  assert.equal(ui.focus, 'scrollback');
+  assert.equal(ui.input, 'hello');
+  ui.pressKey('\t');
+  assert.equal(ui.focus, 'prompt');
+});

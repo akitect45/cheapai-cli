@@ -12,10 +12,12 @@ import { saveSession, appendSessionEntry } from './session.js';
 import { mergeSessionUsage, normalizeUsage } from './usage.js';
 import { createEventStream } from './events.js';
 import { createOperationJournal } from './operation-journal.js';
-import { createToolRuntime } from './tools.js';
+import { createToolRuntime, GOAL_TOOL_NAMES, isGitMutating, isMcpMutating, isSkillMutating } from './tools.js';
 import { parseToolArguments } from './tool-contract.js';
-
-const GOAL_TOOL_NAMES = new Set(['read_file', 'glob', 'grep', 'todo_write']);
+import { runAskQuestion } from './ask-question.js';
+import { runSubagent } from './subagent.js';
+import { createMcpManager } from './mcp.js';
+import { looksLarge, listMarkdownDocs } from './project-docs.js';
 
 export function createAgentRuntime(options = {}) {
   const {
@@ -42,6 +44,11 @@ export function createAgentRuntime(options = {}) {
     timeBudgetMs = 0,
     customTools = [],
     eventHooks = null,
+    mcp = null,
+    mcpServers = null,
+    maxSubagentTurns = 40,
+    projectDocs = false,
+    isSubagent = false,
   } = options;
   const runId = crypto.randomUUID();
   const events = createEventStream({ sessionId: session?.id, runId });
@@ -122,11 +129,16 @@ export function createAgentRuntime(options = {}) {
       });
       const recoveredOperations = journal.recover();
       if (reconcileUncertainOperations(session, recoveredOperations)) saveSession(session);
+      const mcpManager = mcp || createMcpManager({ cwd: session.cwd || process.cwd(), servers: mcpServers });
+      await mcpManager.ensure();
       const runtime = createToolRuntime({
         cwd: session.cwd || process.cwd(),
         pathMode,
         extraRoots,
         customTools,
+        mcp: mcpManager,
+        session,
+        includeParentTools: !isSubagent,
         onTodo: (todos) => {
           if (ui?.onTodo) ui.onTodo(todos);
           else if (!print) process.stdout.write(`\x1b[2m  todos: ${todos.map((t) => `${t.status[0]}:${t.id}`).join(' ')}\x1b[0m\n`);
@@ -147,6 +159,18 @@ export function createAgentRuntime(options = {}) {
       try {
         const content = Array.isArray(userText) ? userText : String(userText || '');
         const titleText = Array.isArray(content) ? content.map((part) => part?.text || part?.content || '').join(' ') : content;
+        if (projectDocs && looksLarge(titleText) && listMarkdownDocs(session.cwd).length === 0 && !session.projectDocs && !allowAll && !print) {
+          const picked = await runAskQuestion({
+            prompt: 'This looks like large work. Create markdown under docs/ first?',
+            options: [
+              { id: 'create', label: 'Create docs and implement' },
+              { id: 'skip', label: 'Skip docs this session' },
+            ],
+          }, { askQuestion: ui?.askQuestion, signal: runSignal, yolo: allowAll, print });
+          session.projectDocs = { skipped: picked.selected === 'skip', source: null };
+        } else if (projectDocs && allowAll && !session.projectDocs) {
+          session.projectDocs = { skipped: false, source: null };
+        }
         session.messages.push({ role: 'user', content });
         if (!session.title) session.title = sessionTitle(titleText);
         saveSession(session);
@@ -230,6 +254,21 @@ export function createAgentRuntime(options = {}) {
               print,
               ui,
               middleware,
+              helpers: {
+                client,
+                model: session.model || model,
+                pathMode,
+                extraRoots,
+                permissionMode: allowAll ? 'yolo' : permissionMode,
+                requestPermission,
+                temperature,
+                reasoningEffort,
+                maxSubagentTurns,
+                customTools,
+                mcp: mcpManager,
+                isSubagent,
+                onFileChange: (change) => recordFileChange(checkpoint, change),
+              },
               onPermissionModeChange: (nextMode) => {
                 allowAll = true;
                 gate = createPermissionGate('yolo', requestPermission, {
@@ -347,6 +386,7 @@ async function executeToolBatch({
   print,
   ui,
   middleware,
+  helpers = {},
   onPermissionModeChange,
   emitEvent,
 }) {
@@ -358,7 +398,12 @@ async function executeToolBatch({
     let args = parsed.ok ? parsed.args : null;
     let error = parsed.ok ? null : parsed.error;
     const tool = parsed.tool || runtime.registry.get(name);
-    if (parsed.ok && goalMode && !GOAL_TOOL_NAMES.has(name)) {
+    if (parsed.ok && goalMode && (
+      !GOAL_TOOL_NAMES.has(name)
+      || (name === 'git' && isGitMutating(args?.action))
+      || (name === 'skill' && isSkillMutating(args?.action))
+      || isMcpMutating(name, args || {})
+    )) {
       error = { code: 'goal_mode_denied', message: 'Goal mode allows only read, search, and todo tools.' };
     }
     if (parsed.ok && !error) {
@@ -381,10 +426,10 @@ async function executeToolBatch({
       batchIndex: callIndex,
     };
     emitEvent('tool_preflight', { name, detail, error }, { turnId });
-    if (!error && !permitAll && gate.requiresApproval(name)) {
+    if (!error && !permitAll && gate.requiresApproval(name, args || {})) {
       if (ui?.onToolPending) ui.onToolPending(name, detail, meta);
       else if (!print) console.log(`\x1b[33m\n○ ${name} · approval required\x1b[0m \x1b[2m${String(detail).slice(0, 120)}\x1b[0m`);
-      const decision = await gate.approve(name, detail, { signal: runSignal });
+      const decision = await gate.approve(name, detail, { signal: runSignal, args: args || {} });
       if (decision === 'always') {
         permitAll = true;
         onPermissionModeChange?.('yolo');
@@ -400,20 +445,31 @@ async function executeToolBatch({
     batchCount: prepared.length,
   });
 
-  const results = [];
-  for (let index = 0; index < prepared.length;) {
-    const current = prepared[index];
-    const parallel = current.tool?.execution === 'parallel';
+  const results = new Array(prepared.length);
+  const taskIndexes = [];
+  const otherItems = [];
+  prepared.forEach((item, index) => {
+    if (item.name === 'task' && !item.error) taskIndexes.push(index);
+    else otherItems.push({ item, index });
+  });
+  const taskPromises = taskIndexes.map((index) => executeOne(prepared[index]).then((result) => {
+    results[index] = result;
+  }));
+  for (let i = 0; i < otherItems.length;) {
+    const parallel = otherItems[i].item.tool?.execution === 'parallel';
     const group = [];
-    while (index < prepared.length && (prepared[index].tool?.execution === 'parallel') === parallel) group.push(prepared[index++]);
-    const groupResults = parallel
-      ? await Promise.all(group.map((item) => executeOne(item)))
-      : [];
-    if (!parallel) {
-      for (const item of group) groupResults.push(await executeOne(item));
+    while (i < otherItems.length && (otherItems[i].item.tool?.execution === 'parallel') === parallel) {
+      group.push(otherItems[i++]);
     }
-    results.push(...groupResults);
+    if (parallel) {
+      await Promise.all(group.map(async ({ item, index }) => {
+        results[index] = await executeOne(item);
+      }));
+    } else {
+      for (const { item, index } of group) results[index] = await executeOne(item);
+    }
   }
+  await Promise.all(taskPromises);
   return results;
 
   async function executeOne(item) {
@@ -439,12 +495,43 @@ async function executeToolBatch({
     let result;
     let status = 'ok';
     try {
-      result = await runtime.execute(name, args, {
-        signal: runSignal,
-        callId: operationId,
-        onUpdate: (data) => emitEvent('tool_update', { name, ...data }, { turnId }),
-        onProcess: (processRecord) => journal.processStarted(operationId, processRecord),
-      });
+      if (name === 'ask_question') {
+        result = await runAskQuestion(args, {
+          askQuestion: ui?.askQuestion,
+          signal: runSignal,
+          yolo: alwaysApprove || permitAll,
+          print,
+          isSubagent: !!helpers.isSubagent,
+        });
+      } else if (name === 'task') {
+        result = await runSubagent({
+          args,
+          client: helpers.client,
+          model: helpers.model,
+          cwd: runtime.root,
+          pathMode: helpers.pathMode,
+          extraRoots: helpers.extraRoots,
+          permissionMode: helpers.permissionMode,
+          requestPermission: helpers.requestPermission,
+          print,
+          ui,
+          signal: runSignal,
+          temperature: helpers.temperature,
+          reasoningEffort: helpers.reasoningEffort,
+          maxTurns: helpers.maxSubagentTurns,
+          customTools: helpers.customTools,
+          mcp: helpers.mcp,
+          onFileChange: helpers.onFileChange,
+          onTodo: (todos) => ui?.onTodo?.(todos),
+        });
+      } else {
+        result = await runtime.execute(name, args, {
+          signal: runSignal,
+          callId: operationId,
+          onUpdate: (data) => emitEvent('tool_update', { name, ...data }, { turnId }),
+          onProcess: (processRecord) => journal.processStarted(operationId, processRecord),
+        });
+      }
       for (const after of middleware.after || []) {
         const changed = await after({ callId: call.id, name, args, tool, result, session, cwd: runtime.root, signal: runSignal });
         if (changed?.result !== undefined) result = changed.result;

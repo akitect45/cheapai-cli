@@ -16,6 +16,9 @@ const PROJECT_CONFIG_KEYS = new Set([
   'showThinking',
   'autoCompact',
   'compactThreshold',
+  'defaultRules',
+  'projectDocs',
+  'followupSuggestions',
 ]);
 
 export function homeDir() {
@@ -79,7 +82,7 @@ export function loadConfig() {
     webOrigin: DEFAULT_WEB_ORIGIN,
     model: DEFAULT_MODEL,
     permissionMode: 'ask',
-    maxTurns: 0,
+    maxTurns: 40,
     temperature: 0.2,
     reasoningEffort: 'off',
     showThinking: true,
@@ -90,6 +93,11 @@ export function loadConfig() {
     extraRoots: [],
     approvedExtensions: [],
     wireApi: 'chat',
+    defaultRules: '',
+    projectDocs: false,
+    followupSuggestions: true,
+    maxSubagentTurns: 40,
+    mcpServers: {},
   };
   if (!fs.existsSync(p)) return defaults;
   try {
