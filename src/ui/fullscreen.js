@@ -52,6 +52,7 @@ const COMMANDS = [
   ['/thinking', 'toggle reasoning display'],
   ['/details', 'toggle tool details'],
   ['/goal', 'toggle goal planning mode'],
+  ['/docs', 'toggle project documentation mode'],
   ['/rename', 'rename current session'],
   ['/export', 'export Markdown transcript'],
   ['/ask', 'ask before writes'],
@@ -109,6 +110,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     hitZones: [],
     /** Follow-ups queued while the agent is working */
     pendingQueue: [],
+    followups: [],
     /** Vertical scroll offset inside the multi-line composer (visual lines). */
     inputScroll: 0,
     /**
@@ -342,6 +344,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
   function submitInput() {
     if (commandSuggestions().length) completeCommand();
     const value = state.input.trim();
+    if (value) state.followups = [];
 
     // While the agent is working: queue follow-ups, or empty Enter injects mid-run (steering).
     if (state.busy) {
@@ -567,8 +570,10 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     }
     if (pendingExit) clearPendingExit({ clearNotice: true });
 
-    // Tab toggles Grok-style prompt ↔ scrollback focus.
+    // Tab completes a slash command when the suggestion list is open.
+    // Otherwise it toggles Grok-style prompt ↔ scrollback focus.
     if (key === '\t') {
+      if (state.focus === 'prompt' && completeCommand()) return;
       if (state.focus === 'prompt') focusScrollback();
       else focusPrompt();
       return;
@@ -688,7 +693,6 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     if (key === '\u0019') return submitAction('/redo');
     if (key === '\u0010') return moveHistory(-1);
     if (key === '\u000e') return moveHistory(1);
-    if (key === '\t' && completeCommand()) return;
     if (key === '\x1b[D') return moveCursor(-1);
     if (key === '\x1b[C') return moveCursor(1);
     if (key === '\x1b[H') return setCursor(0);
@@ -705,6 +709,15 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     }
     if (key === '\r' || key === '\n') {
       submitInput();
+      return;
+    }
+    if (!state.input && !state.busy && state.followups.length && /^[1-3]$/.test(key)) {
+      const item = state.followups[Number(key) - 1];
+      if (item?.text) {
+        state.input = item.text;
+        state.cursor = iterateGraphemes(item.text).length;
+        submitInput();
+      }
       return;
     }
     if (key >= ' ') insertText(key);
@@ -1416,7 +1429,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
 
   function moveCommand(amount) {
     const suggestions = commandSuggestions();
-    if (!suggestions.length || state.busy) return false;
+    if (!suggestions.length) return false;
     state.commandIndex = (state.commandIndex + amount + suggestions.length) % suggestions.length;
     renderSoon();
     return true;
@@ -1424,7 +1437,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
 
   function completeCommand() {
     const suggestions = commandSuggestions();
-    if (!suggestions.length || state.busy) return false;
+    if (!suggestions.length) return false;
     const [command] = suggestions[Math.min(state.commandIndex, suggestions.length - 1)];
     state.input = command;
     state.cursor = iterateGraphemes(command).length;
@@ -1516,6 +1529,21 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
       signal,
     });
     return confirm === 'always' ? 'always' : false;
+  }
+
+  async function askQuestion(prompt, options, { signal = null } = {}) {
+    const choice = await pick({
+      title: 'Question',
+      subtitle: sanitizeTerminalText(prompt),
+      signal,
+      options: options.map((option) => ({
+        label: option.label,
+        hint: option.id,
+        action: option.id,
+      })),
+    });
+    if (choice == null) return null;
+    return options.find((option) => option.id === choice) || { id: choice, label: String(choice) };
   }
 
   function closeOverlay(option, meta = null) {
@@ -1763,6 +1791,17 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
         state.entries.push({ type: 'todo', todos });
         renderSoon();
       },
+      onSubagent({ id, title, status, detail, result }) {
+        let entry = [...state.entries].reverse().find((item) => item.type === 'subagent' && item.id === id);
+        if (!entry) {
+          entry = { type: 'subagent', id, title, status, detail, result: null };
+          state.entries.push(entry);
+        } else {
+          Object.assign(entry, { title, status, detail, result: result || entry.result });
+        }
+        renderSoon();
+      },
+      askQuestion,
     };
   }
 
@@ -2022,6 +2061,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
       else if (entry.type === 'banner') renderBanner(lines, entry, width);
       else if (entry.type === 'info') renderInfo(lines, entry, width);
       else if (entry.type === 'todo') renderTodo(lines, entry, width);
+      else if (entry.type === 'subagent') renderSubagent(lines, entry, width);
       const end = lines.length;
       if (end > start) entryRanges.push({ index: entryIndex, start, end });
       if (entry.type === 'tool' && entry.result?.diff) {
@@ -2141,6 +2181,14 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     }
   }
 
+  function renderSubagent(lines, entry, width) {
+    const mark = entry.status === 'done' ? t.green('✓') : entry.status === 'error' || entry.status === 'aborted' ? t.red('✗') : t.yellow('●');
+    lines.push('', `${mark} ${t.tool('Task')}  ${clipCells(clean(entry.title || 'subagent'), width - 10)}  ${t.dim(entry.status || '')}`);
+    if (entry.detail && state.showToolDetails) {
+      lines.push(t.dim(`  ${clipCells(clean(entry.detail), width - 4)}`));
+    }
+  }
+
   function renderTodo(lines, entry, width) {
     lines.push('', t.bold('Tasks'));
     for (const todo of entry.todos || []) {
@@ -2177,6 +2225,11 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
         out.push(t.yellow(`  ▸ queue  ${clipCells(clean(item), Math.max(8, width - 12))}`));
       }
     }
+    if (state.followups.length && !state.busy && !state.input) {
+      state.followups.slice(0, 3).forEach((item, index) => {
+        out.push(t.dim(`  ${index + 1}  ${clipCells(clean(item.text), Math.max(8, width - 6))}`));
+      });
+    }
     const prefixLines = out.length;
     if (maxScr > 0) {
       const label = ` ${state.inputScroll + 1}-${Math.min(lineCount, state.inputScroll + vis)}/${lineCount} `;
@@ -2206,11 +2259,15 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     out.push(joinSides(leftMeta, mode, width));
     const notice = state.notice
       ? paintNotice(state.notice, state.noticeTone)
-      : state.focus === 'scrollback'
-        ? t.dim('drag select  ·  ↑↓ block  ·  y/Ctrl+C copy  ·  Tab prompt')
-        : state.busy
-          ? t.dim('Enter queue  ·  empty Enter inject  ·  drag select chat  ·  Esc stop')
-          : t.dim('Enter send  ·  drag select chat/input  ·  Tab scrollback  ·  Esc stop');
+      : commandSuggestions().length
+        ? t.dim('↑↓ select  ·  Tab complete  ·  Enter run  ·  Esc clear')
+        : state.followups.length && !state.input && !state.busy
+          ? t.dim('1/2/3 follow-up  ·  Enter send  ·  Esc clear')
+        : state.focus === 'scrollback'
+          ? t.dim('drag select  ·  ↑↓ block  ·  y/Ctrl+C copy  ·  Tab prompt')
+          : state.busy
+            ? t.dim('Enter queue  ·  empty Enter inject  ·  drag select chat  ·  Esc stop')
+            : t.dim('Enter send  ·  drag select chat/input  ·  Tab scrollback  ·  Esc stop');
     out.push(clipStyled(notice, width));
     out._composerMeta = { inputBodyLines: vis, prefixLines };
     return out;
@@ -2281,6 +2338,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     readInput,
     pick,
     requestPermission,
+    askQuestion,
     writeUser,
     writeUsage,
     writeContext,
@@ -2293,6 +2351,18 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     resetSession,
     renderSnapshot(columns = 80, rows = 24) {
       return renderFrame(Math.max(1, columns), Math.max(1, rows));
+    },
+    pressKey(key) {
+      handleKey(key);
+    },
+    get input() {
+      return state.input;
+    },
+    get focus() {
+      return state.focus;
+    },
+    get commandIndex() {
+      return state.commandIndex;
     },
     agentHooks,
     get model() { return state.model; },
@@ -2316,6 +2386,10 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     setContextWindow(value) { state.contextWindow = Number(value) || null; renderSoon(); },
     setAccountUsage(value) { state.accountUsage = value || null; renderSoon(); },
     setShowBalance(value) { state.showBalance = !!value; renderSoon(); },
+    setFollowups(items) {
+      state.followups = Array.isArray(items) ? items.slice(0, 3) : [];
+      renderSoon();
+    },
     setAbortHandler(handler) { abortHandler = typeof handler === 'function' ? handler : null; },
     setCommands(commands) {
       state.commands = [...COMMANDS, ...commands.map((command) => [`/${command.name}`, command.description])];
@@ -2415,7 +2489,24 @@ function paintNotice(value, tone) {
 }
 
 function toolLabel(name) {
-  return ({ bash: 'Bash', read_file: 'Read', write_file: 'Write', edit_file: 'Edit', glob: 'Glob', grep: 'Grep', todo_write: 'Tasks' })[name] || clean(name);
+  return ({
+    bash: 'Bash',
+    read_file: 'Read',
+    write_file: 'Write',
+    edit_file: 'Edit',
+    glob: 'Glob',
+    grep: 'Grep',
+    todo_write: 'Tasks',
+    git: 'Git',
+    web_fetch: 'Fetch',
+    ask_question: 'Ask',
+    task: 'Task',
+    project_docs: 'Docs',
+    skill: 'Skill',
+    mcp_manage: 'MCP',
+    list_mcp_tools: 'MCP',
+    call_mcp_tool: 'MCP',
+  })[name] || clean(name);
 }
 
 function toolSummary(entry) {

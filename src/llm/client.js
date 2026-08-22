@@ -1,7 +1,10 @@
 import OpenAI from 'openai';
-import { loadAuth, loadConfig, resolveApiKey, resolveBaseUrl, resolveModel, saveConfig } from '../config.js';
+import { loadAuth, loadConfig, resolveApiKey, resolveBaseUrl, resolveModel, resolveWireApi, saveConfig } from '../config.js';
 import { getProvider } from './providers.js';
 import { DEFAULT_PROVIDER_MAX_RETRIES } from './errors.js';
+import { isResponsesWsConnectFailure } from './responses-ws.js';
+
+export const CHEAPAI_CLIENT_META = Symbol('cheapaiClientMeta');
 
 export function createClient(overrides = {}) {
   const auth = loadAuth();
@@ -13,18 +16,24 @@ export function createClient(overrides = {}) {
     );
   }
   const baseURL = overrides.baseUrl || resolveBaseUrl(cfg, auth);
+  const wireApi = resolveWireApi(overrides.wireApi, cfg);
+  const providerId = wireApi === 'responses-ws' ? 'openai-responses-ws' : 'openai-compatible';
+  const client = new OpenAI({ apiKey, baseURL, maxRetries: 0, defaultHeaders: { 'User-Agent': 'CheapAI-CLI/0.3' } });
+  client[CHEAPAI_CLIENT_META] = { baseURL, apiKey, wireApi, providerId };
   return {
-    client: new OpenAI({ apiKey, baseURL, maxRetries: 0, defaultHeaders: { 'User-Agent': 'CheapAI-CLI/0.3' } }),
+    client,
     model: resolveModel(overrides.model, cfg),
     baseURL,
     apiKey,
     cfg,
-    providerId: 'openai-compatible',
+    providerId,
+    wireApi,
   };
 }
 
 /**
  * Stream chat completion with tools + optional reasoning effort.
+ * CheapAI IDE uses wireApi=responses-ws (Codex-style WSS /v1/responses).
  */
 export async function chatWithTools({
   client,
@@ -39,8 +48,13 @@ export async function chatWithTools({
   signal = null,
   maxRetries = DEFAULT_PROVIDER_MAX_RETRIES,
   idleTimeoutMs,
+  wireApi = null,
+  baseURL = null,
+  apiKey = null,
 }) {
-  return getProvider('openai-compatible').stream({
+  const meta = client?.[CHEAPAI_CLIENT_META] || {};
+  const resolvedWire = resolveWireApi(wireApi || meta.wireApi);
+  const streamOpts = {
     client,
     model,
     messages,
@@ -53,7 +67,18 @@ export async function chatWithTools({
     onRetry,
     maxRetries,
     idleTimeoutMs,
-  });
+    baseURL: baseURL || meta.baseURL || client?.baseURL,
+    apiKey: apiKey || meta.apiKey || client?.apiKey,
+  };
+  if (resolvedWire === 'responses-ws') {
+    try {
+      return await getProvider('openai-responses-ws').stream(streamOpts);
+    } catch (error) {
+      if (error.partialOutput || !isResponsesWsConnectFailure(error)) throw error;
+      return getProvider('openai-compatible').stream(streamOpts);
+    }
+  }
+  return getProvider('openai-compatible').stream(streamOpts);
 }
 
 export async function listModels(client, { providerId = 'openai-compatible' } = {}) {

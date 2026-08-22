@@ -3,7 +3,10 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
+import { spawnSync } from 'node:child_process';
+import { createPermissionGate } from '../src/agent/permissions.js';
 import { createToolRuntime } from '../src/agent/tools.js';
+import { htmlTitle, htmlToText, fetchUrl } from '../src/agent/web-fetch.js';
 import { runProcess, safeChildEnvironment } from '../src/agent/process-runner.js';
 
 test('tool schemas reject malformed arguments before execution', async () => withWorkspace(async (root) => {
@@ -79,6 +82,61 @@ test('glob returns immediately when already aborted', async () => withWorkspace(
   assert.ok(Date.now() - started < 500);
 }));
 
+test('web_fetch rejects non-http URLs and extracts HTML', async () => {
+  const blocked = await fetchUrl('file:///etc/passwd');
+  assert.equal(blocked.error.includes('http'), true);
+  assert.equal(htmlTitle('<title>이전 작업</title>'), '이전 작업');
+  assert.match(htmlTitle(`<html><head><title>${'이전작업'.repeat(40)}`), /이전/);
+  assert.match(htmlToText('<p>Hello &amp; <b>world</b></p>'), /Hello & world/);
+  const fetched = await fetchUrl('https://example.com/docs', {
+    fetchImpl: async () => ({
+      status: 200,
+      url: 'https://example.com/docs',
+      headers: { get: () => 'text/html; charset=utf-8' },
+      arrayBuffer: async () => Buffer.from('<html><head><title>Docs</title></head><body><p>Read me</p></body></html>'),
+    }),
+  });
+  assert.equal(fetched.ok, true);
+  assert.equal(fetched.title, 'Docs');
+  assert.match(fetched.text, /Read me/);
+});
+
+test('git tool inspects and commits inside the workspace only', async () => {
+  await withWorkspace(async (root) => {
+    git(root, ['init', '-b', 'main']);
+    git(root, ['config', 'user.email', 'test@example.com']);
+    git(root, ['config', 'user.name', 'Test']);
+    git(root, ['config', 'commit.gpgsign', 'false']);
+    fs.writeFileSync(path.join(root, 'readme.txt'), 'hello\n');
+    const runtime = createToolRuntime({ cwd: root });
+    const before = await runtime.execute('git', { action: 'status' });
+    assert.equal(before.repo, true);
+    assert.equal(before.files.some((file) => file.path === 'readme.txt'), true);
+    const committed = await runtime.execute('git', { action: 'commit', message: 'add readme', paths: ['readme.txt'] });
+    assert.equal(committed.repo, true);
+    assert.equal(committed.files.length, 0);
+    const escaped = await runtime.execute('git', { action: 'diff', path: '../secret.txt' });
+    assert.match(String(escaped.error || escaped.code), /workspace|Path|escapes/i);
+  });
+});
+
+test('permission gate allows git inspect and web_fetch without a prompt', () => {
+  const ask = createPermissionGate('ask');
+  assert.equal(ask.requiresApproval('web_fetch', { url: 'https://example.com' }), false);
+  assert.equal(ask.requiresApproval('git', { action: 'status' }), false);
+  assert.equal(ask.requiresApproval('git', { action: 'commit' }), true);
+  assert.equal(ask.requiresApproval('ask_question'), false);
+  assert.equal(ask.requiresApproval('task'), false);
+  assert.equal(ask.requiresApproval('project_docs'), false);
+  assert.equal(ask.requiresApproval('list_mcp_tools'), false);
+  assert.equal(ask.requiresApproval('skill', { action: 'list' }), false);
+  assert.equal(ask.requiresApproval('skill', { action: 'create' }), true);
+  assert.equal(ask.requiresApproval('mcp_manage', { action: 'list' }), false);
+  assert.equal(ask.requiresApproval('mcp_manage', { action: 'connect' }), true);
+  assert.equal(ask.requiresApproval('call_mcp_tool'), true);
+  assert.equal(ask.requiresApproval('bash'), true);
+});
+
 function withWorkspace(callback) {
   const root = fs.mkdtempSync(path.join(os.tmpdir(), 'cheapai-tool-test-'));
   return Promise.resolve(callback(root)).finally(() => {
@@ -88,4 +146,11 @@ function withWorkspace(callback) {
       /* Windows can keep a dying child attached to the temp cwd briefly. */
     }
   });
+}
+
+function git(cwd, args) {
+  const result = spawnSync('git', args, { cwd, encoding: 'utf8' });
+  if (result.status !== 0) {
+    throw new Error(result.stderr || result.stdout || 'git failed');
+  }
 }

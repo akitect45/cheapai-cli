@@ -503,6 +503,15 @@ function toolLabel(name) {
     glob: 'Glob',
     grep: 'Grep',
     todo_write: 'Tasks',
+    git: 'Git',
+    web_fetch: 'Fetch',
+    ask_question: 'Ask',
+    task: 'Task',
+    project_docs: 'Docs',
+    skill: 'Skill',
+    mcp_manage: 'MCP',
+    list_mcp_tools: 'MCP',
+    call_mcp_tool: 'MCP',
   };
   return labels[name] || name;
 }
@@ -520,6 +529,13 @@ function resultPreview(name, result) {
   }
   if (Array.isArray(result.files)) return `${result.files.length} file${result.files.length === 1 ? '' : 's'} found`;
   if (Array.isArray(result.matches)) return `${result.matches.length} match${result.matches.length === 1 ? '' : 'es'} found`;
+  if (name === 'git' && result.branch) {
+    const dirty = Array.isArray(result.files) ? result.files.length : 0;
+    return `${result.branch}${dirty ? ` · ${dirty} change${dirty === 1 ? '' : 's'}` : ''}`;
+  }
+  if (name === 'web_fetch' && (result.title || result.finalUrl || result.url)) {
+    return result.title || result.finalUrl || result.url;
+  }
   return '';
 }
 

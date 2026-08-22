@@ -2,12 +2,22 @@ import os from 'node:os';
 import path from 'node:path';
 import { findProjectInstructions } from '../config.js';
 import { discoverSkills } from '../resources/skills.js';
+import { projectDocsInstruction } from '../agent/project-docs.js';
 
 /**
  * Claude Code–style system prompt: tool discipline, edit policy, environment facts.
  * Tools are also declared via OpenAI `tools` schema; this text steers *when/how* to use them.
  */
-export function buildSystemPrompt({ cwd, model, goalMode = false, agentInstructions = '' } = {}) {
+export function buildSystemPrompt({
+  cwd,
+  model,
+  goalMode = false,
+  agentInstructions = '',
+  defaultRules = '',
+  mcpCatalog = '',
+  projectDocs = false,
+  session = {},
+} = {}) {
   const root = path.resolve(cwd || process.cwd());
   const instructions = findProjectInstructions(root);
   const projectBlocks = instructions
@@ -65,12 +75,23 @@ For each user request:
 | \`read_file\` | Read a file (optional offset/limit lines) |
 | \`edit_file\` | Surgical replace of exact text |
 | \`write_file\` | Create file or full overwrite |
-| \`bash\` | git, package managers, builds, tests, file moves via shell |
+| \`bash\` | package managers, builds, tests, file moves via shell |
+| \`git\` | repo status/diff/log/stage/commit/push/pull (prefer over bash git) |
+| \`web_fetch\` | Read an http(s) URL on this machine |
 | \`todo_write\` | Track multi-step tasks |
+| \`ask_question\` | Multiple-choice prompt; wait for the user's pick |
+| \`task\` | Parallel subagent for an independent workstream |
+| \`project_docs\` | docs/ status and conflict source-of-truth |
+| \`skill\` | Create/list/import reusable skills |
+| \`mcp_manage\` / \`list_mcp_tools\` / \`call_mcp_tool\` | Local MCP servers |
 
 ## Tool usage notes
 - **Search before ask:** locate symbols with grep/glob instead of asking the user for paths you can find.
-- **Organize/cleanup:** list with glob, read samples, then edit/move via bash (\`move\`/\`mv\`/\`Rename-Item\`) or rewrite; keep git status clean if a repo.
+- **User must choose:** ask_question with 2–6 labels. Never ask them to type 1/2. Skip ask_question in YOLO.
+- **Large independent workstreams:** task once per stream in the SAME turn. Skip for tiny edits.
+- **URL to read:** web_fetch on this PC. MCP listed below: list_mcp_tools / call_mcp_tool; mcp_manage to add.
+- **Skill create/update/delete:** skill tool. action=import copies Cursor/Claude/Codex skills.
+- **Organize/cleanup:** list with glob, read samples, then edit/move via bash or rewrite; keep git status clean if a repo.
 - **Batch edits:** multiple edit_file calls are fine; keep each old_string unique.
 - **bash output** may be truncated; re-run with a narrower command if needed.
 - Do **not** use bash \`cat\`/\`echo\` to edit large files when edit_file/write_file exist.
@@ -83,8 +104,8 @@ For each user request:
 
 ${goalMode ? `# Goal mode
 You are in goal mode. Define the desired outcome, success criteria, constraints, and a sequenced implementation plan before any implementation work.
-- You may inspect the workspace with read-only tools and maintain a todo list.
-- Do not edit files or run shell commands in this mode, even if the user asks for implementation.
+- You may inspect the workspace with read-only tools, \`web_fetch\`, read-only \`git\`, \`ask_question\`, \`project_docs\`, skill list/get, MCP list, and maintain a todo list.
+- Do not edit files, mutate git, or run shell commands in this mode, even if the user asks for implementation.
 - State the recommended next action, dependencies, risks, and any decision required from the user.
 - The user must leave goal mode with \`/goal off\` before you make workspace changes.
 ` : ''}
@@ -92,6 +113,14 @@ You are in goal mode. Define the desired outcome, success criteria, constraints,
 ${agentInstructions ? `# Agent profile
 ${agentInstructions}
 ` : ''}
+
+${defaultRules ? `# User default rules
+${defaultRules}
+` : ''}
+
+${projectDocs ? `${projectDocsInstruction(root, session)}\n` : ''}
+
+${mcpCatalog ? `${mcpCatalog}\n` : ''}
 
 # Available skills
 ${skillBlocks || '_No approved skill files found. Skill files are context only and are never executed._'}

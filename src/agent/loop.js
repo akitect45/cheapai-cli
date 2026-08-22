@@ -1,7 +1,5 @@
-import { TOOL_DEFINITIONS } from './tools.js';
+import { GOAL_TOOL_NAMES, TOOL_DEFINITIONS } from './tools.js';
 import { createAgentRuntime } from './runtime.js';
-
-const GOAL_TOOL_NAMES = new Set(['read_file', 'glob', 'grep', 'todo_write']);
 
 export function toolsForMode(goalMode = false) {
   return goalMode
