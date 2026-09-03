@@ -61,17 +61,86 @@ export function accountBalance(accountUsage) {
   return accountUsage?.balance ?? accountUsage?.credits ?? null;
 }
 
+export function isPlanBilling(accountUsage = {}) {
+  if (!accountUsage || typeof accountUsage !== 'object') return false;
+  if (accountUsage.billingMode === 'usage' || accountUsage.unit === 'credits') return false;
+  if (accountUsage.billingMode === 'plan' || accountUsage.unit === 'percent') return true;
+  return Number.isFinite(Number(accountUsage.remainingPercent))
+    || accountUsage.planTier != null
+    || accountUsage.extraCredits != null
+    || accountUsage.remainingOk != null;
+}
+
+export function formatPlanPercent(value) {
+  if (value == null || !Number.isFinite(Number(value))) return '—';
+  return `${Math.round(Number(value))}%`;
+}
+
+export function formatPeriodEnd(value) {
+  if (!value) return '—';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+  return date.toLocaleString('en-US', {
+    month: 'short',
+    day: 'numeric',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+export function planTierLabel(tier) {
+  const id = String(tier || '').trim();
+  if (!id) return '—';
+  return id.charAt(0).toUpperCase() + id.slice(1);
+}
+
+/** Header chip: plan remaining %, plus extra credits if the wallet has a top-up. */
+export function accountHeaderLabel(accountUsage) {
+  if (!accountUsage) return null;
+  if (isPlanBilling(accountUsage)) {
+    const extra = Number(accountUsage.extraCredits);
+    const hasExtra = Number.isFinite(extra) && extra > 0;
+    const percent = Number(accountUsage.remainingPercent);
+    const parts = [];
+    if (Number.isFinite(percent)) parts.push(`${Math.round(percent)}% left`);
+    if (hasExtra) parts.push(`extra ${formatCompactCredits(extra)}`);
+    if (!parts.length) return accountUsage.remainingOk === false ? 'plan empty' : null;
+    if (accountUsage.remainingOk === false && !hasExtra) return 'plan empty';
+    return parts.join(' · ');
+  }
+  const extra = Number(accountUsage.extraCredits ?? accountBalance(accountUsage));
+  if (Number.isFinite(extra) && extra > 0) return `extra ${formatCompactCredits(extra)}`;
+  return accountUsage.remainingOk === false ? 'plan empty' : null;
+}
+
 export function accountUsageRows(accountUsage = {}) {
   const key = accountUsage.key || {};
   const metrics = accountUsage.metrics || accountUsage.usage || {};
   const remaining = key.creditsRemaining == null ? 'unlimited key' : formatCredits(key.creditsRemaining);
+  if (isPlanBilling(accountUsage)) {
+    const extra = Number(accountUsage.extraCredits);
+    return [
+      ['plan', planTierLabel(accountUsage.planTier)],
+      ['period', accountUsage.period || 'week'],
+      ['used', formatPlanPercent(accountUsage.usedPercent)],
+      ['left', formatPlanPercent(accountUsage.remainingPercent)],
+      ['resets', formatPeriodEnd(accountUsage.periodEnd)],
+      ['extra credits', Number.isFinite(extra) ? formatCredits(extra) : '0'],
+      ['can send', accountUsage.remainingOk === false ? 'no — top up extra credits' : 'yes'],
+      ['12h requests', formatCredits(metrics.requests ?? metrics.requests_12h)],
+      ['12h tokens', formatTokens(metrics.tokens ?? metrics.tokens_12h)],
+      ['key', key.name || accountUsage.username || '—'],
+      ['key used', formatCredits(key.creditsUsed)],
+      ['key remaining', remaining],
+    ];
+  }
+  const extra = Number(accountUsage.extraCredits ?? accountBalance(accountUsage));
   return [
-    ['balance', formatWon(accountBalance(accountUsage))],
-    ['today', formatWon(accountUsage.spentToday ?? accountUsage.spent)],
-    ['this month', formatWon(accountUsage.spentMonth)],
-    ['12h requests', formatCredits(metrics.requests)],
-    ['12h tokens', formatTokens(metrics.tokens)],
-    ['12h spent', formatWon(metrics.spent)],
+    ['extra credits', Number.isFinite(extra) ? formatCredits(extra) : '—'],
+    ['can send', accountUsage.remainingOk === false ? 'no — top up extra credits' : 'yes'],
+    ['12h requests', formatCredits(metrics.requests ?? metrics.requests_12h)],
+    ['12h tokens', formatTokens(metrics.tokens ?? metrics.tokens_12h)],
     ['key', key.name || accountUsage.username || '—'],
     ['key used', formatCredits(key.creditsUsed)],
     ['key remaining', remaining],
@@ -84,8 +153,22 @@ export function sessionUsageRows(sessionUsage = {}, messages = [], contextWindow
     ['input tokens', formatTokens(sessionUsage.inputTokens)],
     ['output tokens', formatTokens(sessionUsage.outputTokens)],
     ['total tokens', formatTokens(sessionUsage.totalTokens)],
-    ['billed', formatWon(sessionUsage.credits)],
     ['context', contextUsageLabel(messages, contextWindow)],
+  ];
+}
+
+export function planStatusRows(accountUsage) {
+  if (!accountUsage) return [['plan', 'not loaded']];
+  if (!isPlanBilling(accountUsage)) {
+    return [['account', accountHeaderLabel(accountUsage) || '—']];
+  }
+  const extra = Number(accountUsage.extraCredits);
+  return [
+    ['plan', planTierLabel(accountUsage.planTier)],
+    ['left', formatPlanPercent(accountUsage.remainingPercent)],
+    ['resets', formatPeriodEnd(accountUsage.periodEnd)],
+    ['extra credits', Number.isFinite(extra) ? formatCredits(extra) : '0'],
+    ['can send', accountUsage.remainingOk === false ? 'no — top up extra credits' : 'yes'],
   ];
 }
 

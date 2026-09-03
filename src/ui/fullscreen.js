@@ -19,9 +19,8 @@ import {
 import { paintDiffLines } from './diff.js';
 import { copyText } from './clipboard.js';
 import {
-  accountBalance,
+  accountHeaderLabel,
   estimateMessagesTokens,
-  formatCompactCredits,
   formatTokens,
 } from '../agent/usage.js';
 
@@ -34,8 +33,8 @@ const COMPOSER_MIN_LINES = 2;
 const COMMANDS = [
   ['/help', 'show commands'],
   ['/status', 'session and runtime info'],
-  ['/usage', 'session tokens and account spend'],
-  ['/credits', 'show credits or toggle header'],
+  ['/usage', 'session tokens and plan usage'],
+  ['/credits', 'show plan usage or toggle header'],
   ['/compact', 'summarize old context'],
   ['/undo', 'undo last turn and tracked edits'],
   ['/redo', 'restore last undone turn'],
@@ -2010,8 +2009,8 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     const details = [busy];
     if (state.effort && state.effort !== 'off') details.push(t.dim(`effort ${state.effort}`));
     if (state.agent && state.agent !== 'build') details.push(t.magenta(`agent ${state.agent}`));
-    const balance = accountBalance(state.accountUsage);
-    if (state.showBalance && balance != null) details.push(t.green(`₩${formatCompactCredits(balance)}`));
+    const headerUsage = accountHeaderLabel(state.accountUsage);
+    if (state.showBalance && headerUsage) details.push(t.green(headerUsage));
     const estimated = state.contextEstimate;
     if (estimated) {
       const context = state.contextWindow
@@ -2093,9 +2092,7 @@ export function createFullscreenChatUi({ model, mode, effort, agent = 'build', g
     if (entry.completedAt || entry.usage) {
       const elapsed = entry.completedAt && entry.startedAt ? ` · ${((entry.completedAt - entry.startedAt) / 1000).toFixed(1)}s` : '';
       const usage = entry.usage ? ` · ${formatTokens(entry.usage.prompt_tokens || 0)} in / ${formatTokens(entry.usage.completion_tokens || 0)} out` : '';
-      const costValue = entry.usage?.cost_credits ?? entry.usage?.cost_krw;
-      const cost = Number(costValue) > 0 ? ` · ₩${formatCompactCredits(costValue)}` : '';
-      lines.push(t.dim(`${state.model}${elapsed}${usage}${cost}`));
+      lines.push(t.dim(`${state.model}${elapsed}${usage}`));
     }
   }
 
@@ -2494,6 +2491,9 @@ function toolLabel(name) {
     read_file: 'Read',
     write_file: 'Write',
     edit_file: 'Edit',
+    list_dir: 'List',
+    delete_file: 'Delete',
+    move_file: 'Move',
     glob: 'Glob',
     grep: 'Grep',
     todo_write: 'Tasks',
@@ -2502,6 +2502,7 @@ function toolLabel(name) {
     ask_question: 'Ask',
     task: 'Task',
     project_docs: 'Docs',
+    research: 'Research',
     skill: 'Skill',
     mcp_manage: 'MCP',
     list_mcp_tools: 'MCP',
@@ -2511,7 +2512,9 @@ function toolLabel(name) {
 
 function toolSummary(entry) {
   if (entry.result?.error) return String(entry.result.error);
+  if (entry.result?.from && entry.result?.to) return `${shortPath(entry.result.from)} → ${shortPath(entry.result.to)}`;
   if (entry.result?.path) return shortPath(entry.result.path);
+  if (Array.isArray(entry.result?.entries)) return `${entry.result.entries.length} items`;
   if (Array.isArray(entry.result?.files)) return `${entry.result.files.length} files`;
   if (Array.isArray(entry.result?.matches)) return `${entry.result.matches.length} matches`;
   if (entry.result?.stdout || entry.result?.stderr) {

@@ -4,6 +4,7 @@ import { safeChildEnvironment } from './process-runner.js';
 
 const INIT_TIMEOUT_MS = 15_000;
 const CALL_TIMEOUT_MS = 60_000;
+export const MAX_JSONRPC_BYTES = 8 * 1024 * 1024;
 
 export const MCP_CATALOG = [
   { id: 'github', name: 'GitHub', url: 'https://api.githubcopilot.com/mcp/', transport: 'http', auth: 'pat', description: 'Repos, issues, PRs. Needs a PAT.' },
@@ -177,14 +178,26 @@ async function connectStdio(name, cfg, cwd) {
   let buffer = Buffer.alloc(0);
   child.stdout.on('data', (chunk) => {
     buffer = Buffer.concat([buffer, chunk]);
-    while (true) {
-      const parsed = readRpc(buffer);
-      if (!parsed) break;
-      buffer = parsed.rest;
-      const id = parsed.message?.id;
-      if (id != null && pending.has(id)) {
-        pending.get(id)(parsed.message);
-        pending.delete(id);
+    try {
+      while (true) {
+        const parsed = readRpc(buffer);
+        if (!parsed) break;
+        buffer = parsed.rest;
+        const id = parsed.message?.id;
+        if (id != null && pending.has(id)) {
+          pending.get(id)(parsed.message);
+          pending.delete(id);
+        }
+      }
+    } catch (error) {
+      for (const settle of pending.values()) {
+        settle({ error: { message: error.message || String(error) } });
+      }
+      pending.clear();
+      try {
+        child.kill('SIGTERM');
+      } catch {
+        /* already gone */
       }
     }
   });
@@ -204,7 +217,7 @@ async function connectStdio(name, cfg, cwd) {
   await request('initialize', {
     protocolVersion: '2024-11-05',
     capabilities: {},
-    clientInfo: { name: 'cheapai-cli', version: '0.3' },
+    clientInfo: { name: 'cheapai-cli', version: '0.4' },
   }, INIT_TIMEOUT_MS);
   writeRpc(child.stdin, { jsonrpc: '2.0', method: 'notifications/initialized' });
   const listed = await request('tools/list', {}, INIT_TIMEOUT_MS).catch(() => ({ tools: [] }));
@@ -246,7 +259,7 @@ async function connectHttp(name, cfg) {
   await request('initialize', {
     protocolVersion: '2024-11-05',
     capabilities: {},
-    clientInfo: { name: 'cheapai-cli', version: '0.3' },
+    clientInfo: { name: 'cheapai-cli', version: '0.4' },
   }, INIT_TIMEOUT_MS);
   await request('notifications/initialized', {}).catch(() => {});
   const listed = await request('tools/list', {}, INIT_TIMEOUT_MS).catch(() => ({ tools: [] }));
@@ -258,12 +271,15 @@ function writeRpc(stdin, message) {
   stdin.write(`Content-Length: ${Buffer.byteLength(body)}\r\n\r\n${body}`);
 }
 
-function readRpc(buffer) {
+export function readRpc(buffer) {
   const text = buffer.toString('utf8');
   const match = text.match(/^Content-Length:\s*(\d+)\r?\n\r?\n/i);
   if (match) {
     const headerBytes = Buffer.byteLength(match[0]);
     const length = Number(match[1]);
+    if (!Number.isFinite(length) || length < 0 || length > MAX_JSONRPC_BYTES) {
+      throw new Error('MCP message too large');
+    }
     if (buffer.length < headerBytes + length) return null;
     const message = JSON.parse(buffer.subarray(headerBytes, headerBytes + length).toString('utf8'));
     return { message, rest: buffer.subarray(headerBytes + length) };
@@ -276,9 +292,14 @@ function readRpc(buffer) {
 }
 
 async function readHttpRpc(response, id) {
+  const declared = Number(response.headers.get('content-length') || 0);
+  if (Number.isFinite(declared) && declared > MAX_JSONRPC_BYTES) {
+    throw new Error('MCP message too large');
+  }
   const type = String(response.headers.get('content-type') || '');
   if (type.includes('text/event-stream')) {
     const text = await response.text();
+    if (text.length > MAX_JSONRPC_BYTES) throw new Error('MCP message too large');
     const events = [...text.matchAll(/data:\s*(\{[\s\S]*?\})(?:\n\n|$)/g)].map((match) => {
       try {
         return JSON.parse(match[1]);
@@ -288,7 +309,9 @@ async function readHttpRpc(response, id) {
     }).filter(Boolean);
     return events.find((event) => event.id === id) || events.at(-1) || {};
   }
-  return response.json();
+  const text = await response.text();
+  if (text.length > MAX_JSONRPC_BYTES) throw new Error('MCP message too large');
+  return text ? JSON.parse(text) : {};
 }
 
 function slug(value) {

@@ -7,6 +7,7 @@ API: `https://api.cheapai.im/v1`
 - 서버 인증: [docs/SERVER_CLI_AUTH.md](./docs/SERVER_CLI_AUTH.md)
 - TUI 사용법과 구조: [docs/TUI.md](./docs/TUI.md)
 - OpenCode 기능 대조: [docs/OPENCODE_PARITY.md](./docs/OPENCODE_PARITY.md)
+- 릴리즈 노트: [CHANGELOG.md](./CHANGELOG.md)
 
 ## 설치
 
@@ -110,8 +111,8 @@ cheapai --agent reviewer
 | `/ask` | 도구 확인 |
 | `/accept-edits` | 파일 수정 자동 |
 | `/status` | 세션 정보 |
-| `/usage` | 현재 세션 토큰·비용과 계정 사용액 |
-| `/credits [on|off]` | 계정 잔액·키 사용량 표시 또는 header 잔액 표시 설정 |
+| `/usage` | 현재 세션 토큰과 플랜 사용량 |
+| `/credits [on|off]` | 플랜 사용량·추가 크레딧 표시 또는 header 표시 설정 |
 | `/compact` | 오래된 대화를 요약하고 현재 작업을 유지 |
 | `/undo` | 마지막 turn과 `write_file`/`edit_file` 변경 복원 |
 | `/redo` | 마지막 undo의 대화와 추적 파일 변경 재적용 |
@@ -133,7 +134,7 @@ cheapai --agent reviewer
 
 ## 도구
 
-`bash` · `read_file` · `write_file` · `edit_file` · `glob` · `grep` · `todo_write` · `git` · `web_fetch` · `ask_question` · `task` · `project_docs` · `skill` · `mcp_manage` · `list_mcp_tools` · `call_mcp_tool`
+`bash` · `read_file` · `write_file` · `edit_file` · `list_dir` · `delete_file` · `move_file` · `glob` · `grep` · `todo_write` · `git` · `web_fetch` · `ask_question` · `task` · `project_docs` · `research` · `skill` · `mcp_manage` · `list_mcp_tools` · `call_mcp_tool`
 
 프로젝트 지침: `CHEAPAI.md` / `AGENTS.md` / `CLAUDE.md`
 
@@ -144,7 +145,22 @@ Agent profile은 같은 위치의 `agents/*.md`에서 로드되며 `/agent` 또�
 `cheapai --agent <name>`으로 선택합니다.
 
 Skill은 `.cheapai/skills/<name>/SKILL.md`에서 발견되어 bounded prompt context로만
-사용되며 실행되지 않습니다. Local JS/TS extension은 `.cheapai/extensions/`에서
+사용되며 실행되지 않습니다. CLI는 Anthropic 공개 스킬을 참고해 `frontend-design`,
+`skill-creator`, `mcp-builder`, `webapp-testing`을 기본 제공하고,
+CheapAI 게이트웨이 연동은 `cheapai-api`, 벤치 연구 흐름은 `autoresearch`로
+넣었습니다. `research` 도구는 workspace `.cheapai/autoresearch/`에
+`METRIC`/`ASI` ledger를 남깁니다. 바깥 세션 supervisor가 아니며 `/goal`
+계획 모드와도 다릅니다.
+
+```powershell
+cheapai research init --goal "cut p95" --metric latency_ms --direction lower --cmd "node bench.js"
+cheapai research run
+cheapai research status
+cheapai research flag <run-id> --reason "reward-hack"
+cheapai research clear
+```
+
+같은 이름의 프로젝트/사용자 스킬이 있으면 기본 스킬을 덮어씁니다. Local JS/TS extension은 `.cheapai/extensions/`에서
 발견되지만 `approvedExtensions`에 path 또는 SHA-256이 명시된 경우에만 trusted code로
 로드됩니다. Extension approval은 owner-owned `~/.cheapai/config.json`에서만 읽으며
 canonical absolute path만 허용합니다. Project `.cheapai/config.json`은 스스로 실행
@@ -185,8 +201,11 @@ global config 전용이며 project config에서는 무시됩니다.
 `autoCompact`가 켜져 있으면 모델 context window의 80%에 가까워질 때 CLI가
 이전 대화를 요약해 세션을 계속 유지합니다. `--no-auto-compact`로 한 번의
 실행에서 끌 수 있고, `compactThreshold`로 기준을 조정할 수 있습니다.
-잔액은 기본적으로 header에 표시하지 않습니다. `/credits`는 현재 계정 잔액과
-사용량을 확인하고, `/credits on`과 `/credits off`는 `showBalance` 설정을 저장합니다.
+플랜 사용량은 기본적으로 header에 표시하지 않습니다. `/credits`는 남은 주간
+허용량(%)과 추가 크레딧을 확인하고, `/credits on`과 `/credits off`는
+`showBalance` 설정을 저장합니다. 챗·턴마다 요금은 표시하지 않습니다.
+플랜이 100%면 추가 크레딧으로 호출이 이어지고, 둘 다 없으면 대시보드에서
+추가 크레딧을 충전합니다.
 `/help`, `/config`, `/status` 같은 slash 안내 출력은 1분 뒤 또는 다음 일반 메시지를
 전송할 때 conversation viewport에서 자동으로 정리됩니다.
 

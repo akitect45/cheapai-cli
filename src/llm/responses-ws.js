@@ -247,7 +247,7 @@ export async function streamResponsesTurn({
 }
 
 function defaultUserAgent() {
-  return process.versions?.electron ? 'CheapAI-IDE/0.3' : 'CheapAI-CLI/0.3';
+  return process.versions?.electron ? 'CheapAI-IDE/0.4' : 'CheapAI-CLI/0.4';
 }
 
 function connectError(message) {

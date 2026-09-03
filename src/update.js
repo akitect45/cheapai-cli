@@ -1,14 +1,23 @@
 import fs from 'node:fs';
 import path from 'node:path';
-import { exec, spawn } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import { ensureHome } from './config.js';
 import { VERSION } from './ui/theme.js';
 
 const PACKAGE_NAME = '@akitect/cheapai';
 const REGISTRY_URL = 'https://registry.npmjs.org/%40akitect%2Fcheapai';
 const CACHE_TTL_MS = 24 * 60 * 60 * 1000;
+const SAFE_PACKAGE_VERSION = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
 export const UPDATE_REQUEST_TIMEOUT_MS = 2_500;
 const INSTALL_TIMEOUT_MS = 2 * 60 * 1000;
+
+export function safePackageVersion(version) {
+  const value = String(version || '').trim().replace(/^v/i, '');
+  if (!SAFE_PACKAGE_VERSION.test(value)) {
+    throw new Error('업데이트 버전 형식이 올바르지 않습니다.');
+  }
+  return value;
+}
 
 function cachePath() {
   return path.join(ensureHome(), 'cache', 'update.json');
@@ -86,7 +95,8 @@ async function fetchLatestVersion({
     });
     if (!response.ok) throw new Error(`update registry returned ${response.status}`);
     const data = await response.json();
-    return data?.['dist-tags']?.latest || data?.version || null;
+    const latest = data?.['dist-tags']?.latest || data?.version || null;
+    return latest ? safePackageVersion(latest) : null;
   })();
   try {
     return await withTimeout(work, timeoutMs, 'update check timed out');
@@ -134,52 +144,58 @@ export async function checkForUpdate(options = {}) {
   }
 }
 
-function npmExecutable() {
-  return process.platform === 'win32' ? 'npm.cmd' : 'npm';
-}
-
-function quoteCmdArg(value) {
-  return `"${String(value).replace(/"/g, '""')}"`;
-}
-
 export function npmInstallArgs(latestVersion) {
   return [
     'install',
     '--global',
-    `${PACKAGE_NAME}@${latestVersion}`,
+    `${PACKAGE_NAME}@${safePackageVersion(latestVersion)}`,
     '--no-audit',
     '--no-fund',
     '--loglevel=error',
   ];
 }
 
-function runWindowsNpmInstall(args) {
-  return new Promise((resolve, reject) => {
-    const command = [npmExecutable(), ...args].map(quoteCmdArg).join(' ');
-    const child = exec(command, {
-      windowsHide: true,
-      timeout: INSTALL_TIMEOUT_MS,
-      maxBuffer: 8 * 1024 * 1024,
-    }, (error) => {
-      if (!error) {
-        resolve();
-      } else if (error.killed) {
-        reject(new Error('Update timed out. Check the network connection and try again.'));
-      } else {
-        reject(new Error(`Update command failed (code ${error.code ?? 'unknown'}).`));
-      }
-    });
-    child.stdout?.pipe(process.stdout);
-    child.stderr?.pipe(process.stderr);
-  });
+/**
+ * Resolve npm next to this Node binary. Bare `npm.cmd` via cmd.exe searches
+ * the current directory first, so a leftover `~/npm.cmd` or
+ * `~/node_modules/npm` breaks `cheapai --update` from the user home.
+ */
+export function resolveNpmInvocation({
+  platform = process.platform,
+  execPath = process.execPath,
+  existsSync = fs.existsSync,
+} = {}) {
+  const nodeDir = path.dirname(execPath);
+  const cliCandidates = platform === 'win32'
+    ? [path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npm-cli.js')]
+    : [
+      path.join(nodeDir, '..', 'lib', 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+      path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npm-cli.js'),
+    ];
+  for (const cli of cliCandidates) {
+    if (existsSync(cli)) {
+      return { command: execPath, argsPrefix: [cli], cwd: nodeDir };
+    }
+  }
+  const npmBin = path.join(nodeDir, platform === 'win32' ? 'npm.cmd' : 'npm');
+  if (existsSync(npmBin)) {
+    return { command: npmBin, argsPrefix: [], cwd: nodeDir };
+  }
+  const error = new Error(
+    'Cannot find npm next to this Node.js install. Use the Node.js installer npm, not a leftover npm.cmd in your home folder. Then run: npm install -g @akitect/cheapai@latest',
+  );
+  error.code = 'npm_not_found';
+  throw error;
 }
 
 function runNpmInstall(args) {
-  if (process.platform === 'win32') return runWindowsNpmInstall(args);
+  const invocation = resolveNpmInvocation();
   return new Promise((resolve, reject) => {
-    const child = spawn(npmExecutable(), args, {
+    const child = spawn(invocation.command, [...invocation.argsPrefix, ...args], {
       stdio: 'inherit',
       windowsHide: true,
+      cwd: invocation.cwd,
+      shell: false,
     });
     let timedOut = false;
     const timer = setTimeout(() => {

@@ -32,12 +32,15 @@ export function manageSkill(args = {}, cwd = process.cwd()) {
     if (!name) return { error: 'name is required' };
     if (!instructions) return { error: 'instructions is required' };
     const existing = findSkill(skills, { name, id: args.id });
-    if (existing) return writeSkill(existing, { ...args, instructions }, 'updated', note);
+    if (existing && existing.scope !== 'bundled') return writeSkill(existing, { ...args, instructions }, 'updated', note);
     if (skills.filter((item) => item.scope === 'user').length >= MAX_SKILLS) return { error: 'Skill limit is 50.' };
     return writeSkill({ name, path: path.join(userSkillsDir(), name, 'SKILL.md') }, { ...args, instructions, enabled: args.enabled !== false }, 'created', note);
   }
   const current = findSkill(skills, args);
   if (!current) return { error: 'Skill not found. Pass id or name.' };
+  if (current.scope === 'bundled') {
+    return { error: 'Bundled skills are read-only. Create a user skill with the same name to override.' };
+  }
   if (mapped === 'update') return writeSkill(current, args, 'updated', note);
   if (mapped === 'enable' || mapped === 'disable') {
     return writeSkill(current, { enabled: mapped === 'enable' }, mapped, note);

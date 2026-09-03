@@ -1,5 +1,6 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import readline from 'node:readline';
 import { snapshotFile } from './history.js';
 import { atomicWriteFile } from './session-format.js';
 import { createPathPolicy } from './path-policy.js';
@@ -11,12 +12,16 @@ import { isGitMutating, runGitTool } from './git.js';
 import { handleProjectDocs } from './project-docs.js';
 import { isSkillMutating, manageSkill } from './skill-store.js';
 import { isMcpMutating } from './mcp.js';
+import { dispatchResearch, isResearchMutating } from '../research/index.js';
+import { applyEdits, normalizeEditList } from './edit-match.js';
+import { escapeRegExp, matchGlob, walkFiles } from './fs-walk.js';
 
-export { isGitMutating, isSkillMutating, isMcpMutating };
+export { isGitMutating, isSkillMutating, isMcpMutating, isResearchMutating };
 export const GOAL_TOOL_NAMES = new Set([
-  'read_file', 'glob', 'grep', 'todo_write', 'web_fetch', 'git',
+  'read_file', 'list_dir', 'glob', 'grep', 'todo_write', 'web_fetch', 'git',
   'ask_question', 'project_docs', 'skill', 'list_mcp_tools',
 ]);
+const MAX_INLINE_READ_BYTES = 4 * 1024 * 1024;
 export const PARENT_ONLY_TOOLS = new Set(['task', 'ask_question']);
 
 function throwIfAborted(signal) {
@@ -32,11 +37,15 @@ const TOOL_WIRE_SPECS = [
     function: {
       name: 'bash',
       description:
-        'Run a shell command in the session working directory. Use for npm/pnpm, builds, tests, moving/renaming files, directory listing. Prefer the git tool for repository status/diff/log/stage/commit/checkout instead of bash git. Do NOT use bash to read/edit large source files — use read_file/edit_file/write_file instead. On Windows this runs via cmd.exe /c.',
+        'Run a shell command. Use for package managers, builds, tests, and commands with no dedicated tool. Prefer list_dir/glob/grep/read_file/edit_file/move_file/delete_file/git over shell for those jobs. On Windows this runs via cmd.exe /c.',
       parameters: {
         type: 'object',
         properties: {
           command: { type: 'string', description: 'Command to run' },
+          working_directory: {
+            type: 'string',
+            description: 'Directory to run in (must stay inside the authorized workspace)',
+          },
           timeout_ms: {
             type: 'integer',
             description: 'Timeout in milliseconds (default 120000)',
@@ -51,13 +60,13 @@ const TOOL_WIRE_SPECS = [
     function: {
       name: 'read_file',
       description:
-        'Read a UTF-8 text file from disk (real workspace). ALWAYS read before editing existing files. Optional 1-based offset/limit for large files. Returns numbered lines.',
+        'Read a UTF-8 text file from disk. ALWAYS read before editing existing files. Optional 1-based offset/limit for large files. Returns numbered lines (N|text). Binary files are rejected. If truncated, call again with next_offset.',
       parameters: {
         type: 'object',
         properties: {
           path: { type: 'string' },
           offset: { type: 'integer', description: 'Start line (1-based)' },
-          limit: { type: 'integer', description: 'Max lines to return' },
+          limit: { type: 'integer', description: 'Max lines to return (default 2000, max 5000)' },
         },
         required: ['path'],
       },
@@ -84,7 +93,7 @@ const TOOL_WIRE_SPECS = [
     function: {
       name: 'edit_file',
       description:
-        'Surgical in-place edit: replace exact old_string with new_string (whitespace-sensitive). old_string must appear exactly once unless replace_all=true. Re-read the file if the match fails. Preferred over write_file for existing code.',
+        'Surgical in-place edit. Provide old_string/new_string, or edits[] for several replacements in one file. old_string must be unique unless replace_all=true. CRLF/LF differences are tolerated. If a match fails, the result includes hint and similar lines — use those instead of rewriting the whole file.',
       parameters: {
         type: 'object',
         properties: {
@@ -92,8 +101,21 @@ const TOOL_WIRE_SPECS = [
           old_string: { type: 'string' },
           new_string: { type: 'string' },
           replace_all: { type: 'boolean' },
+          edits: {
+            type: 'array',
+            description: 'Multiple replacements applied in order to the same file',
+            items: {
+              type: 'object',
+              properties: {
+                old_string: { type: 'string' },
+                new_string: { type: 'string' },
+                replace_all: { type: 'boolean' },
+              },
+              required: ['old_string', 'new_string'],
+            },
+          },
         },
-        required: ['path', 'old_string', 'new_string'],
+        required: ['path'],
       },
     },
   },
@@ -117,7 +139,7 @@ const TOOL_WIRE_SPECS = [
     type: 'function',
     function: {
       name: 'grep',
-      description: 'Search file contents with a regular expression.',
+      description:         'Search file contents. pattern is a regular expression unless fixed_string=true. Use context for surrounding lines. Skips node_modules, .git, and other build directories.',
       parameters: {
         type: 'object',
         properties: {
@@ -126,8 +148,57 @@ const TOOL_WIRE_SPECS = [
           glob: { type: 'string', description: 'Optional filename filter e.g. *.js' },
           max_matches: { type: 'integer' },
           case_insensitive: { type: 'boolean' },
+          fixed_string: { type: 'boolean', description: 'Treat pattern as a literal string' },
+          context: { type: 'integer', description: 'Lines of context around each match (0-5)' },
         },
         required: ['pattern'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'list_dir',
+      description:
+        'List one directory (name, type, size). Prefer this over bash ls/dir. Use glob for recursive filename search.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string', description: 'Directory to list (default workspace root)' },
+          max_entries: { type: 'integer', description: 'Max entries to return (default 200)' },
+        },
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'delete_file',
+      description:
+        'Delete one file, or an empty directory, inside the workspace. Prefer this over bash rm. Refuses non-empty directories.',
+      parameters: {
+        type: 'object',
+        properties: {
+          path: { type: 'string' },
+        },
+        required: ['path'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
+      name: 'move_file',
+      description:
+        'Rename or move one file inside the workspace. Prefer this over bash mv. Set overwrite=true to replace an existing destination. Directories are not moved.',
+      parameters: {
+        type: 'object',
+        properties: {
+          from: { type: 'string' },
+          to: { type: 'string' },
+          overwrite: { type: 'boolean' },
+        },
+        required: ['from', 'to'],
       },
     },
   },
@@ -259,6 +330,30 @@ const TOOL_WIRE_SPECS = [
   {
     type: 'function',
     function: {
+      name: 'research',
+      description:
+        'Workspace research harness. init a METRIC/ASI experiment under .cheapai/autoresearch, run a benchmark command, status the ledger, flag a bad run, or clear. Research-only: do not change product source. Prefer this over raw bash when logging keep/discard metrics.',
+      parameters: {
+        type: 'object',
+        properties: {
+          action: { type: 'string', enum: ['init', 'run', 'status', 'flag', 'clear'] },
+          goal: { type: 'string', description: 'Research question for init' },
+          name: { type: 'string', description: 'Experiment name' },
+          primaryMetric: { type: 'string', description: 'Primary METRIC name (default metric)' },
+          direction: { type: 'string', enum: ['lower', 'higher'] },
+          command: { type: 'string', description: 'Harness command for init/run' },
+          description: { type: 'string', description: 'Optional note stored on a run' },
+          runId: { type: 'string', description: 'Run id or number for flag' },
+          reason: { type: 'string', description: 'Why a run is flagged' },
+          timeout_ms: { type: 'integer', description: 'Run timeout in milliseconds' },
+        },
+        required: ['action'],
+      },
+    },
+  },
+  {
+    type: 'function',
+    function: {
       name: 'skill',
       description:
         'Create, list, update, enable, disable, delete, or import CheapAI skills. Skills are SKILL.md files. Use this when the user asks to make or save a reusable agent skill. name + instructions are required to create. action=import copies skills from Cursor/Claude/Codex.',
@@ -330,6 +425,9 @@ const TOOL_POLICIES = {
   read_file: { execution: 'parallel', sideEffect: 'none' },
   write_file: { execution: 'sequential', sideEffect: 'filesystem' },
   edit_file: { execution: 'sequential', sideEffect: 'filesystem' },
+  list_dir: { execution: 'parallel', sideEffect: 'none' },
+  delete_file: { execution: 'sequential', sideEffect: 'filesystem' },
+  move_file: { execution: 'sequential', sideEffect: 'filesystem' },
   glob: { execution: 'parallel', sideEffect: 'none' },
   grep: { execution: 'parallel', sideEffect: 'none' },
   todo_write: { execution: 'sequential', sideEffect: 'none' },
@@ -338,6 +436,7 @@ const TOOL_POLICIES = {
   ask_question: { execution: 'sequential', sideEffect: 'none' },
   task: { execution: 'parallel', sideEffect: 'process' },
   project_docs: { execution: 'parallel', sideEffect: 'none' },
+  research: { execution: 'sequential', sideEffect: 'process' },
   skill: { execution: 'sequential', sideEffect: 'none' },
   mcp_manage: { execution: 'sequential', sideEffect: 'process' },
   list_mcp_tools: { execution: 'parallel', sideEffect: 'none' },
@@ -378,26 +477,75 @@ export function createToolRuntime({
     return new Promise((resolve) => setImmediate(resolve));
   }
 
-  async function readFile(filePath, offset, limit) {
+  async function readFile(filePath, offset, limit, signal = null) {
     const abs = resolveSafe(filePath);
-    let text;
+    let stat;
     try {
-      text = await fs.promises.readFile(abs, 'utf8');
+      stat = await fs.promises.stat(abs);
     } catch (error) {
       if (error?.code === 'ENOENT') return { error: `File not found: ${abs}` };
       return { error: String(error?.message || error) };
     }
-    const lines = text.split(/\r?\n/);
-    const start = Math.max(1, offset || 1);
-    const max = limit || 2000;
+    if (stat.isDirectory()) return { error: `Path is a directory: ${abs}. Use list_dir.` };
+    const start = Math.max(1, Number(offset) || 1);
+    const max = Math.min(5000, Math.max(1, Number(limit) || 2000));
+    if (stat.size > MAX_INLINE_READ_BYTES) {
+      return readFileStreamed(abs, start, max, signal);
+    }
+    let buf;
+    try {
+      buf = await fs.promises.readFile(abs);
+    } catch (error) {
+      return { error: String(error?.message || error) };
+    }
+    if (buf.includes(0)) return { error: `Binary file: ${abs}` };
+    const lines = buf.toString('utf8').split(/\r?\n/);
     const slice = lines.slice(start - 1, start - 1 + max);
     const numbered = slice.map((line, i) => `${start + i}|${line}`).join('\n');
+    const truncated = start - 1 + max < lines.length;
     return {
       path: abs,
       total_lines: lines.length,
       content: numbered,
-      truncated: start - 1 + max < lines.length,
+      truncated,
+      ...(truncated ? { next_offset: start + slice.length, hint: `Pass offset=${start + slice.length} to continue.` } : {}),
     };
+  }
+
+  async function readFileStreamed(abs, start, max, signal) {
+    throwIfAborted(signal);
+    if (await fileLooksBinary(abs)) return { error: `Binary file: ${abs}` };
+    const stream = fs.createReadStream(abs, { encoding: 'utf8' });
+    const rl = readline.createInterface({ input: stream, crlfDelay: Infinity });
+    const abort = () => {
+      rl.close();
+      stream.destroy();
+    };
+    signal?.addEventListener('abort', abort, { once: true });
+    try {
+      const slice = [];
+      let lineNo = 0;
+      for await (const line of rl) {
+        throwIfAborted(signal);
+        lineNo += 1;
+        if (lineNo >= start && slice.length < max) slice.push(`${lineNo}|${line}`);
+      }
+      const truncated = start - 1 + max < lineNo;
+      return {
+        path: abs,
+        total_lines: lineNo,
+        content: slice.join('\n'),
+        truncated,
+        ...(truncated ? { next_offset: start + slice.length, hint: `Pass offset=${start + slice.length} to continue.` } : {}),
+      };
+    } catch (error) {
+      if (error?.name === 'AbortError') throw error;
+      return { error: String(error?.message || error) };
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      rl.close();
+      stream.destroy();
+    }
   }
 
   function writeFile(filePath, content) {
@@ -418,29 +566,126 @@ export function createToolRuntime({
     };
   }
 
-  function editFile(filePath, old_string, new_string, replace_all = false) {
-    const abs = resolveSafe(filePath);
+  function editFile(args) {
+    const abs = resolveSafe(args.path);
     if (!fs.existsSync(abs)) return { error: `File not found: ${abs}` };
+    const edits = normalizeEditList(args);
+    if (!edits) return { error: 'Provide old_string/new_string or edits[].' };
     const before = snapshotFile(abs);
     const text = fs.readFileSync(abs, 'utf8');
-    if (!text.includes(old_string)) {
-      return { error: 'old_string not found in file' };
-    }
-    const count = text.split(old_string).length - 1;
-    if (!replace_all && count > 1) {
-      return { error: `old_string matched ${count} times; set replace_all=true or make it unique` };
-    }
-    const next = replace_all ? text.split(old_string).join(new_string) : text.replace(old_string, new_string);
-    atomicWriteFile(abs, next, { mode: existingFileMode(abs) });
+    if (text.includes('\0')) return { error: `Binary file: ${abs}` };
+    const applied = applyEdits(text, edits);
+    if (!applied.ok) return applied;
+    atomicWriteFile(abs, applied.text, { mode: existingFileMode(abs) });
     const after = snapshotFile(abs);
     onFileChange?.({ path: abs, before, after, restorable: before.restorable !== false && after.restorable !== false });
-    // Prefer the surgical span (old → new) so the UI shows the real edit, not the whole file.
+    const first = edits[0] || {};
     return {
       ok: true,
       path: abs,
-      replacements: replace_all ? count : 1,
-      diff: buildDiffPayload(String(old_string ?? ''), String(new_string ?? '')),
+      replacements: applied.replacements,
+      edits: applied.edits,
+      diff: buildDiffPayload(String(first.old_string ?? ''), String(first.new_string ?? '')),
     };
+  }
+
+  async function listDir(dirPath, maxEntries = 200, signal = null) {
+    throwIfAborted(signal);
+    const abs = resolveSafe(dirPath || root);
+    let stat;
+    try {
+      stat = await fs.promises.stat(abs);
+    } catch (error) {
+      if (error?.code === 'ENOENT') return { error: `Directory not found: ${abs}` };
+      return { error: String(error?.message || error) };
+    }
+    if (!stat.isDirectory()) return { error: `Not a directory: ${abs}` };
+    const names = await fs.promises.readdir(abs);
+    names.sort((a, b) => a.localeCompare(b));
+    const limit = Math.min(1000, Math.max(1, Number(maxEntries) || 200));
+    const entries = [];
+    for (const name of names) {
+      throwIfAborted(signal);
+      if (entries.length >= limit) break;
+      const full = path.join(abs, name);
+      try {
+        resolveSafe(full);
+        const info = await fs.promises.lstat(full);
+        const entry = {
+          name,
+          type: info.isSymbolicLink() ? 'symlink' : info.isDirectory() ? 'dir' : 'file',
+        };
+        if (entry.type === 'file') entry.size = info.size;
+        entries.push(entry);
+      } catch {
+        continue;
+      }
+    }
+    return {
+      path: abs,
+      entries,
+      total: names.length,
+      truncated: names.length > entries.length,
+    };
+  }
+
+  function deleteFile(filePath) {
+    const abs = resolveSafe(filePath);
+    if (!fs.existsSync(abs)) return { error: `File not found: ${abs}` };
+    const stat = fs.lstatSync(abs);
+    if (stat.isSymbolicLink()) {
+      const before = snapshotFile(abs);
+      fs.unlinkSync(abs);
+      onFileChange?.({ path: abs, before, after: { exists: false, type: 'file' }, restorable: false });
+      return { ok: true, path: abs, deleted: 'symlink' };
+    }
+    if (stat.isDirectory()) {
+      const children = fs.readdirSync(abs);
+      if (children.length) {
+        return { error: `Directory is not empty: ${abs}. Delete files first or use bash.` };
+      }
+      fs.rmdirSync(abs);
+      return { ok: true, path: abs, deleted: 'directory' };
+    }
+    const before = snapshotFile(abs);
+    fs.unlinkSync(abs);
+    onFileChange?.({
+      path: abs,
+      before,
+      after: { exists: false, type: 'file' },
+      restorable: before.restorable !== false,
+    });
+    return { ok: true, path: abs, deleted: 'file' };
+  }
+
+  function moveFile(fromPath, toPath, overwrite = false) {
+    const src = resolveSafe(fromPath);
+    const dest = resolveSafe(toPath);
+    if (!fs.existsSync(src)) return { error: `File not found: ${src}` };
+    const srcStat = fs.lstatSync(src);
+    if (srcStat.isDirectory()) return { error: 'Moving directories is not supported. Use bash.' };
+    if (src === dest) return { ok: true, from: src, to: dest, unchanged: true };
+    if (fs.existsSync(dest) && !overwrite) {
+      return { error: `Destination exists: ${dest}. Set overwrite=true to replace it.` };
+    }
+    const beforeSrc = snapshotFile(src);
+    const beforeDest = snapshotFile(dest);
+    fs.mkdirSync(path.dirname(dest), { recursive: true });
+    fs.renameSync(src, dest);
+    const afterDest = snapshotFile(dest);
+    onFileChange?.({
+      path: src,
+      before: beforeSrc,
+      after: { exists: false, type: 'file' },
+      restorable: beforeSrc.restorable !== false,
+    });
+    onFileChange?.({
+      path: dest,
+      before: beforeDest,
+      after: afterDest,
+      restorable: beforeDest.restorable !== false && afterDest.restorable !== false,
+    });
+    return { ok: true, from: src, to: dest };
   }
 
   function snapshotText(snapshot) {
@@ -456,86 +701,38 @@ export function createToolRuntime({
     return String(snapshot.content || '');
   }
 
-  function matchGlob(rel, pattern) {
-    // very small glob: ** / * / ?
-    const norm = rel.replace(/\\/g, '/');
-    const pat = String(pattern || '').replace(/\\/g, '/');
-    // common "all files" patterns
-    if (pat === '**/*' || pat === '**' || pat === '*' || pat === '*.*') return true;
-    const esc = pat
-      .replace(/[.+^${}()|[\]\\]/g, '\\$&')
-      .replace(/\*\*/g, '::DS::')
-      .replace(/\*/g, '[^/]*')
-      .replace(/\?/g, '[^/]')
-      .replace(/::DS::/g, '.*');
-    // allow **/*.ext to match files in root too
-    const re = new RegExp(`^${esc}$`, 'i');
-    if (re.test(norm)) return true;
-    // also match basename-only patterns like *.txt against full rel
-    if (!pat.includes('/')) {
-      const base = norm.split('/').pop() || norm;
-      const reBase = new RegExp(
-        `^${pat.replace(/[.+^${}()|[\]\\]/g, '\\$&').replace(/\*/g, '.*').replace(/\?/g, '.')}$`,
-        'i',
-      );
-      return reBase.test(base);
-    }
-    return false;
-  }
-
   async function walkGlob(startDir, pattern, max_results = 200, signal = null) {
-    throwIfAborted(signal);
-    const results = [];
     const base = resolveSafe(startDir || root);
-    const stack = [base];
-    let scanned = 0;
-    while (stack.length && results.length < max_results) {
-      throwIfAborted(signal);
-      const dir = stack.pop();
-      let entries;
-      try {
-        entries = await fs.promises.readdir(dir, { withFileTypes: true });
-      } catch {
-        continue;
-      }
-      for (const ent of entries) {
-        if (results.length >= max_results) break;
-        if (ent.name === 'node_modules' || ent.name === '.git' || ent.name === 'dist') continue;
-        const full = path.join(dir, ent.name);
-        const rel = path.relative(base, full).replace(/\\/g, '/');
-        if (ent.isDirectory() && !ent.isSymbolicLink()) {
-          stack.push(full);
-          continue;
-        }
-        let safeFull;
-        try {
-          safeFull = resolveSafe(full);
-          const st = await fs.promises.stat(safeFull);
-          if (st.isDirectory()) continue;
-        } catch {
-          continue;
-        }
-        if (matchGlob(rel, pattern) || matchGlob(ent.name, pattern)) {
-          results.push(safeFull);
-        }
-        scanned += 1;
-        if (scanned % 24 === 0) {
-          await yieldToEventLoop();
-          throwIfAborted(signal);
-        }
-      }
-    }
-    return results;
+    return walkFiles({
+      base,
+      pattern,
+      maxResults: max_results,
+      signal,
+      resolveSafe,
+      throwIfAborted,
+      yieldToEventLoop,
+    });
   }
 
-  async function grepSearch({ pattern, searchPath, globFilter, max_matches = 50, case_insensitive = false, signal = null }) {
+  async function grepSearch({
+    pattern,
+    searchPath,
+    globFilter,
+    max_matches = 50,
+    case_insensitive = false,
+    fixed_string = false,
+    context = 0,
+    signal = null,
+  }) {
     throwIfAborted(signal);
     let re;
     try {
-      re = new RegExp(pattern, case_insensitive ? 'i' : '');
+      const source = fixed_string ? escapeRegExp(pattern) : pattern;
+      re = new RegExp(source, case_insensitive ? 'i' : '');
     } catch (e) {
       return { error: `Invalid regex: ${e.message}` };
     }
+    const ctx = Math.min(5, Math.max(0, Number(context) || 0));
     const base = resolveSafe(searchPath || root);
     const matches = [];
     const files = [];
@@ -581,13 +778,19 @@ export function createToolRuntime({
       } catch {
         continue;
       }
-      if (text.includes('\0')) continue; // binary skip
+      if (text.includes('\0')) continue;
       const lines = text.split(/\r?\n/);
       for (let i = 0; i < lines.length; i++) {
         if (matches.length >= max_matches) break;
-        if (re.test(lines[i])) {
-          matches.push({ path: safePath, line: i + 1, text: lines[i].slice(0, 300) });
+        re.lastIndex = 0;
+        if (!re.test(lines[i])) continue;
+        re.lastIndex = 0;
+        const match = { path: safePath, line: i + 1, text: lines[i].slice(0, 300) };
+        if (ctx > 0) {
+          match.before = lines.slice(Math.max(0, i - ctx), i).map((line) => line.slice(0, 300));
+          match.after = lines.slice(i + 1, i + 1 + ctx).map((line) => line.slice(0, 300));
         }
+        matches.push(match);
       }
     }
     return { matches, truncated: matches.length >= max_matches };
@@ -601,7 +804,7 @@ export function createToolRuntime({
         onBash?.(args.command);
         return runProcess({
           command: args.command,
-          cwd: root,
+          cwd: args.working_directory ? resolveSafe(args.working_directory) : root,
           timeoutMs: args.timeout_ms || 120_000,
           signal,
           onStart: (processRecord) => {
@@ -611,15 +814,22 @@ export function createToolRuntime({
           },
         });
       case 'read_file':
-        return readFile(args.path, args.offset, args.limit);
+        return readFile(args.path, args.offset, args.limit, signal);
       case 'write_file':
         return writeFile(args.path, args.content);
       case 'edit_file':
-        return editFile(args.path, args.old_string, args.new_string, !!args.replace_all);
-      case 'glob':
-        return {
-          files: await walkGlob(args.root || root, args.pattern, args.max_results || 200, signal),
-        };
+        return editFile(args);
+      case 'list_dir':
+        return listDir(args.path, args.max_entries, signal);
+      case 'delete_file':
+        return deleteFile(args.path);
+      case 'move_file':
+        return moveFile(args.from, args.to, !!args.overwrite);
+      case 'glob': {
+        const maxResults = args.max_results || 200;
+        const files = await walkGlob(args.root || root, args.pattern, maxResults, signal);
+        return { files, truncated: files.length >= maxResults };
+      }
       case 'grep':
         return grepSearch({
           pattern: args.pattern,
@@ -627,6 +837,8 @@ export function createToolRuntime({
           globFilter: args.glob,
           max_matches: args.max_matches || 50,
           case_insensitive: !!args.case_insensitive,
+          fixed_string: !!args.fixed_string,
+          context: args.context,
           signal,
         });
       case 'todo_write':
@@ -648,6 +860,26 @@ export function createToolRuntime({
         return { error: 'task must be launched by the parent agent runtime' };
       case 'project_docs':
         return handleProjectDocs(args, root, session || {});
+      case 'research':
+        return dispatchResearch({
+          cwd: root,
+          action: args.action,
+          goal: args.goal,
+          name: args.name,
+          primaryMetric: args.primaryMetric,
+          direction: args.direction,
+          command: args.command,
+          description: args.description,
+          runId: args.runId,
+          reason: args.reason,
+          timeoutMs: args.timeout_ms,
+          signal,
+          onProcess: (processRecord) => {
+            onProcessStart?.(operationId, processRecord);
+            onProcess?.(processRecord);
+            onUpdate?.({ type: 'process_started', ...processRecord });
+          },
+        });
       case 'skill':
         return manageSkill(args, root);
       case 'list_mcp_tools':
@@ -693,7 +925,10 @@ export function createToolRuntime({
 
   function detailFor(name, args) {
     if (name === 'bash') return args.command;
-    if (name === 'read_file' || name === 'write_file' || name === 'edit_file') return String(args.path || '').trim();
+    if (name === 'read_file' || name === 'write_file' || name === 'edit_file' || name === 'delete_file' || name === 'list_dir') {
+      return String(args.path || '').trim();
+    }
+    if (name === 'move_file') return `${args.from || ''} → ${args.to || ''}`.trim();
     if (name === 'glob') return String(args.pattern || '').trim();
     if (name === 'grep') return `${args.pattern || ''}${args.path ? ` ${args.path}` : ''}`.trim();
     if (name === 'todo_write') return Array.isArray(args.todos) ? `${args.todos.length} task(s)` : '';
@@ -706,6 +941,7 @@ export function createToolRuntime({
     if (name === 'task') return String(args.title || args.prompt || 'subagent').split('\n').find((line) => line.trim())?.slice(0, 80) || 'subagent';
     if (name === 'ask_question') return String(args.prompt || args.title || 'choice');
     if (name === 'project_docs') return String(args.action || 'status');
+    if (name === 'research') return `research ${args.action || 'status'} ${args.command || args.goal || args.runId || ''}`.trim();
     if (name === 'skill') return `skill ${args.action || 'list'} ${args.name || args.id || ''}`.trim();
     if (name === 'mcp_manage') return `mcp ${args.action || 'list'} ${args.name || args.url || args.catalog_id || ''}`.trim();
     if (name === 'call_mcp_tool') return `${args.server || ''}/${args.tool || ''}`;
@@ -729,6 +965,17 @@ function existingFileMode(filePath) {
     return fs.statSync(filePath).mode & 0o777;
   } catch {
     return 0o666;
+  }
+}
+
+async function fileLooksBinary(filePath) {
+  const handle = await fs.promises.open(filePath, 'r');
+  try {
+    const buffer = Buffer.alloc(8192);
+    const { bytesRead } = await handle.read(buffer, 0, buffer.length, 0);
+    return buffer.subarray(0, bytesRead).includes(0);
+  } finally {
+    await handle.close();
   }
 }
 

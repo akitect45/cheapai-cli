@@ -347,10 +347,15 @@ TUI / print
 - canonical workspace/workspace-plus/unrestricted file path policy
 - Unix process group/Windows process tree timeout과 abort, credential-stripped child env
 - command provenance, bounded skill context, explicitly approved local JS/TS extensions
+- workspace research harness: METRIC/ASI parse, `.cheapai/autoresearch` ledger, `research` tool / `cheapai research`
 
 Project `.cheapai/config.json`은 model/temperature/compaction 같은 비보안 option만
 override할 수 있다. Provider endpoint, permission mode, path policy/extra roots와 extension
 approval은 owner-owned global config 전용이며 repository가 자체 권한을 상승시킬 수 없다.
+
+Research harness는 벤치 명령의 stdout 계약이다. detached owner, tmux,
+또는 장기 코딩 세션 supervisor가 아니다. `/goal`은 읽기 전용 계획 모드이고
+gjc `goal` tool / ultragoal ledger와 다르다.
 
 아직 제품 결정이 필요한 단계:
 
@@ -365,4 +370,4 @@ acceptance test를 먼저 추가한다.
 
 ---
 
-*문서 버전: 2026-08-10 · 대상 제품: cheapai-cli*
+*문서 버전: 2026-08-31 · 대상 제품: cheapai-cli*

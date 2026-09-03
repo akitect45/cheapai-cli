@@ -1,12 +1,20 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { resourceRoots } from './commands.js';
 
 const MAX_SKILL_BYTES = 40_000;
 const MAX_TOTAL_BYTES = 120_000;
 
+export function bundledSkillsDir() {
+  return path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../skills');
+}
+
 export function discoverSkills(cwd = process.cwd(), { includeDisabled = false } = {}) {
-  const roots = resourceRoots(cwd, 'skills');
+  const roots = [
+    ...resourceRoots(cwd, 'skills'),
+    { directory: bundledSkillsDir(), scope: 'bundled', root: bundledSkillsDir(), depth: Infinity },
+  ];
   const seen = new Set();
   const skills = [];
   let total = 0;

@@ -4,6 +4,7 @@ import { createPermissionGate } from './permissions.js';
 import { createToolRuntime } from './tools.js';
 import { parseToolArguments } from './tool-contract.js';
 import { isRetryableProviderError } from '../llm/errors.js';
+import { serializeToolResult } from './tool-result.js';
 
 const PARENT_ONLY = new Set(['task', 'ask_question']);
 
@@ -127,7 +128,7 @@ export async function runSubagent({
         messages.push({
           role: 'tool',
           tool_call_id: call.id,
-          content: JSON.stringify(toolResult).slice(0, 80_000),
+          content: serializeToolResult(toolResult),
         });
       }
       continue;

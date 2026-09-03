@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { loadCustomCommands, renderCustomCommand } from '../src/agent/commands.js';
-import { discoverSkills } from '../src/resources/skills.js';
+import { bundledSkillsDir, discoverSkills } from '../src/resources/skills.js';
+import { manageSkill } from '../src/agent/skill-store.js';
 import { loadExtensions } from '../src/resources/extensions.js';
 import { buildSystemPrompt } from '../src/prompts/system.js';
 import { createToolRuntime } from '../src/agent/tools.js';
@@ -33,6 +34,32 @@ test('skills are bounded context discovery and never executed', () => withWorksp
   assert.equal(skills[0].description, 'Review safely');
   assert.equal(skills[0].body.includes('Call no executable content.'), true);
   assert.equal(buildSystemPrompt({ cwd: root, model: 'test' }).includes('Call no executable content.'), true);
+}));
+
+test('bundled Anthropic-inspired skills load last and stay read-only', () => withWorkspace((root) => {
+  const names = discoverSkills(root).map((skill) => skill.name);
+  assert.equal(names.includes('frontend-design'), true);
+  assert.equal(names.includes('skill-creator'), true);
+  assert.equal(names.includes('mcp-builder'), true);
+  assert.equal(names.includes('webapp-testing'), true);
+  assert.equal(names.includes('cheapai-api'), true);
+  assert.equal(names.includes('autoresearch'), true);
+  assert.equal(fs.existsSync(path.join(bundledSkillsDir(), 'frontend-design', 'SKILL.md')), true);
+
+  const prompt = buildSystemPrompt({ cwd: root, model: 'test' });
+  assert.equal(prompt.includes('Avoid the default AI looks'), true);
+  assert.equal(prompt.includes('api.cheapai.im/v1'), true);
+
+  const blocked = manageSkill({ action: 'delete', name: 'frontend-design' }, root);
+  assert.match(String(blocked.error), /read-only|override/i);
+  assert.equal(fs.existsSync(path.join(bundledSkillsDir(), 'frontend-design', 'SKILL.md')), true);
+
+  const overridePath = path.join(root, '.cheapai', 'skills', 'frontend-design', 'SKILL.md');
+  fs.mkdirSync(path.dirname(overridePath), { recursive: true });
+  fs.writeFileSync(overridePath, '---\nname: frontend-design\ndescription: Project override\n---\nUse the project lookbook.\n');
+  const overridden = discoverSkills(root).find((skill) => skill.name === 'frontend-design');
+  assert.equal(overridden.scope, 'project');
+  assert.equal(overridden.body.includes('project lookbook'), true);
 }));
 
 test('extensions require explicit path or hash approval and isolate failures', async () => withWorkspace(async (root) => {

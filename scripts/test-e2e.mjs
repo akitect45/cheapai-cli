@@ -97,6 +97,14 @@ console.log('cheapai e2e\n');
   if (!gr.matches?.length) bad('grep', gr);
   else ok('grep');
 
+  const listed = await rt.execute('list_dir', {});
+  if (!listed.entries?.some((entry) => entry.name === 'hello.txt')) bad('list_dir', listed);
+  else ok('list_dir');
+
+  const moved = await rt.execute('move_file', { from: 'hello.txt', to: 'hello-moved.txt' });
+  if (!moved.ok || !fs.existsSync(path.join(tmp, 'hello-moved.txt'))) bad('move_file', moved);
+  else ok('move_file');
+
   const b = await rt.execute('bash', { command: 'echo e2e-ok' });
   if (!b.ok || !String(b.stdout).includes('e2e-ok')) bad('bash', b);
   else ok('bash');
@@ -381,11 +389,21 @@ console.log('cheapai e2e\n');
     },
     get showBalance() { return showBalance; },
     set showBalance(value) { showBalance = !!value; },
-    async refreshUsage() { return { balance: 12345.5 }; },
+    async refreshUsage() {
+      return {
+        billingMode: 'plan',
+        unit: 'percent',
+        planTier: 'plus',
+        remainingPercent: 75,
+        usedPercent: 25,
+        extraCredits: 0,
+        remainingOk: true,
+      };
+    },
   };
   await handleSlash('/credits', ctx);
   await handleSlash('/credits on', ctx);
-  if (!notices.some((item) => item.title === 'Credits') || !showBalance) {
+  if (!notices.some((item) => item.title === 'Plan') || !showBalance) {
     bad('credits slash command', new Error(JSON.stringify({ notices, showBalance })));
   } else ok('credits slash command');
 
@@ -596,7 +614,13 @@ console.log('cheapai e2e\n');
     sessionUsage: { lastInputTokens: 4000 },
     contextWindow: 10000,
     contextTokens: 4000,
-    accountUsage: { balance: 12345 },
+    accountUsage: {
+      billingMode: 'plan',
+      remainingPercent: 75,
+      extraCredits: 0,
+      remainingOk: true,
+      planTier: 'plus',
+    },
   });
   for (const [columns, rows] of [[10, 8], [40, 16], [80, 24], [120, 36]]) {
     const frame = ui.renderSnapshot(columns, rows);
@@ -608,13 +632,13 @@ console.log('cheapai e2e\n');
     } else ok(`fullscreen frame ${columns}x${rows}`);
   }
   const defaultUsageFrame = ui.renderSnapshot(120, 36);
-  if (defaultUsageFrame.includes('₩12.3k') || !defaultUsageFrame.includes('ctx 40%')) {
-    bad('usage status frame default', new Error('balance should be hidden while context remains visible'));
+  if (defaultUsageFrame.includes('75% left') || defaultUsageFrame.includes('₩') || !defaultUsageFrame.includes('ctx 40%')) {
+    bad('usage status frame default', new Error('plan usage should be hidden while context remains visible'));
   } else ok('usage status frame default');
   ui.setShowBalance(true);
   const visibleUsageFrame = ui.renderSnapshot(120, 36);
-  if (!visibleUsageFrame.includes('₩12.3k')) {
-    bad('usage status frame enabled', new Error('enabled balance missing'));
+  if (!visibleUsageFrame.includes('75% left') || visibleUsageFrame.includes('₩')) {
+    bad('usage status frame enabled', new Error('enabled plan usage missing'));
   } else ok('usage status frame enabled');
 
   ui.resetSession('87654321', 'Resumed work', '', [

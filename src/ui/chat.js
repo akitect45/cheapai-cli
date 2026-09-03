@@ -58,7 +58,7 @@ import {
   contextUsageLabel,
   estimateMessagesTokens,
   formatTokens,
-  formatWon,
+  planStatusRows,
   sessionUsageRows,
 } from '../agent/usage.js';
 import { redoTurn, undoTurn } from '../agent/history.js';
@@ -271,7 +271,7 @@ export async function startChatTui({
     try {
       accountUsage = await fetchAccountUsage({ baseURL, apiKey });
       ui.setAccountUsage?.(accountUsage);
-      if (show) showInfo(uiContext(), 'Account usage', accountUsageRows(accountUsage));
+      if (show) showInfo(uiContext(), 'Plan', accountUsageRows(accountUsage));
       return accountUsage;
     } catch (error) {
       if (show) notify(uiContext(), `Usage unavailable: ${error.message}`, 'error');
@@ -994,9 +994,7 @@ export async function handleSlash(line, ctx) {
     const contextTokens = currentContextTokens(ctx.session);
     const rows = [
       ...sessionUsageRows(ctx.session.usage, contextTokens, ctx.contextWindow),
-      ['account balance', account ? formatWon(account.balance ?? account.credits) : 'unavailable'],
-      ['today', account ? formatWon(account.spentToday ?? account.spent) : 'unavailable'],
-      ['this month', account ? formatWon(account.spentMonth) : 'unavailable'],
+      ...(account ? accountUsageRows(account).filter((row) => ['plan', 'left', 'resets', 'extra credits', 'can send'].includes(row[0])) : [['plan', 'unavailable']]),
     ];
     showInfo(ctx, 'Usage', rows);
     return true;
@@ -1011,12 +1009,12 @@ export async function handleSlash(line, ctx) {
     if (value) {
       ctx.showBalance = value === 'on';
       if (ctx.showBalance) await ctx.refreshUsage(false);
-      notify(ctx, `Header credit ${ctx.showBalance ? 'shown' : 'hidden'}.`, 'success');
+      notify(ctx, `Header plan usage ${ctx.showBalance ? 'shown' : 'hidden'}.`, 'success');
       return true;
     }
     const account = await ctx.refreshUsage(false);
-    if (account) showInfo(ctx, 'Credits', accountUsageRows(account));
-    else notify(ctx, 'Unable to load account credits.', 'error');
+    if (account) showInfo(ctx, 'Plan', accountUsageRows(account));
+    else notify(ctx, 'Unable to load plan usage.', 'error');
     return true;
   }
 
@@ -1125,8 +1123,7 @@ export async function handleSlash(line, ctx) {
       ['messages', ctx.session.messages?.length || 0],
       ['context', contextUsageLabel(currentContextTokens(ctx.session), ctx.contextWindow)],
       ['compactions', ctx.session.compactions?.length || 0],
-      ['session billed', formatWon(ctx.session.usage?.credits)],
-      ['account balance', ctx.accountUsage ? formatWon(ctx.accountUsage.balance ?? ctx.accountUsage.credits) : 'not loaded'],
+      ...planStatusRows(ctx.accountUsage),
       ['auto compact', ctx.autoCompact ? 'on' : 'off'],
     ]);
     return true;
@@ -1275,7 +1272,7 @@ export async function handleSlash(line, ctx) {
       ['permission', config.permissionMode],
       ['effort', config.reasoningEffort],
       ['thinking', config.showThinking ? 'visible' : 'hidden'],
-      ['header credit', config.showBalance ? 'visible' : 'hidden'],
+      ['header usage', config.showBalance ? 'visible' : 'hidden'],
       ['auto compact', config.autoCompact === false ? 'off' : 'on'],
       ['compact threshold', config.compactThreshold],
       ['max turns', config.maxTurns === 0 ? 'unlimited (0)' : config.maxTurns],
@@ -1298,8 +1295,8 @@ function printHelp() {
   ${t.dim('─'.repeat(42))}
   /help                 this help
   /status               session + auth info
-  /usage                session tokens + account spend
-  /credits [on|off]     show account credits or toggle header
+  /usage                session tokens + plan usage
+  /credits [on|off]     show plan usage or toggle header
   /compact              summarize old context and continue
   /undo                 undo last turn and tracked file edits
   /redo                 restore last undone turn
@@ -1335,8 +1332,8 @@ function showHelp(ctx) {
   const rows = [
     ['/help', 'show commands'],
     ['/status', 'session and runtime info'],
-    ['/usage', 'session tokens and account spend'],
-    ['/credits', 'show account credits or toggle header'],
+    ['/usage', 'session tokens and plan usage'],
+    ['/credits', 'show plan usage or toggle header'],
     ['/compact', 'summarize old context and continue'],
     ['/undo', 'undo last turn and tracked edits'],
     ['/redo', 'restore last undone turn'],
@@ -1533,11 +1530,9 @@ function createChatUi({ model, mode, effort, goalMode, cwd, user, sessionId, pri
     if (sessionUsage) state.sessionUsage = sessionUsage;
     if (contextWindow != null) state.contextWindow = Number(contextWindow) || null;
     if (contextTokens != null) state.contextTokens = Number(contextTokens) || 0;
-    const costValue = usage.cost_credits ?? usage.cost_krw;
-    const cost = Number(costValue) > 0 ? `  · ${formatWon(costValue)}` : '';
     console.log(
       t.dim(
-        `  · ${state.model}  ·  ${formatTokens(usage.prompt_tokens || 0)} in / ${formatTokens(usage.completion_tokens || 0)} out${cost}`,
+        `  · ${state.model}  ·  ${formatTokens(usage.prompt_tokens || 0)} in / ${formatTokens(usage.completion_tokens || 0)} out`,
       ),
     );
   }

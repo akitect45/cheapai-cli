@@ -500,6 +500,9 @@ function toolLabel(name) {
     read_file: 'Read',
     write_file: 'Write',
     edit_file: 'Edit',
+    list_dir: 'List',
+    delete_file: 'Delete',
+    move_file: 'Move',
     glob: 'Glob',
     grep: 'Grep',
     todo_write: 'Tasks',
@@ -508,6 +511,7 @@ function toolLabel(name) {
     ask_question: 'Ask',
     task: 'Task',
     project_docs: 'Docs',
+    research: 'Research',
     skill: 'Skill',
     mcp_manage: 'MCP',
     list_mcp_tools: 'MCP',
@@ -524,9 +528,11 @@ function resultPreview(name, result) {
   }
   if (result.path) {
     if (name === 'read_file') return `read ${shortPath(result.path)}`;
-    if (name === 'edit_file' || name === 'write_file') return shortPath(result.path);
+    if (name === 'edit_file' || name === 'write_file' || name === 'delete_file') return shortPath(result.path);
     return `updated ${shortPath(result.path)}`;
   }
+  if (result.from && result.to) return `${shortPath(result.from)} → ${shortPath(result.to)}`;
+  if (Array.isArray(result.entries)) return `${result.entries.length} item${result.entries.length === 1 ? '' : 's'}`;
   if (Array.isArray(result.files)) return `${result.files.length} file${result.files.length === 1 ? '' : 's'} found`;
   if (Array.isArray(result.matches)) return `${result.matches.length} match${result.matches.length === 1 ? '' : 'es'} found`;
   if (name === 'git' && result.branch) {

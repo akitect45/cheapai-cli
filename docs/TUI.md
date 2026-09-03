@@ -103,9 +103,10 @@ CLI 프로세스가 종료될 때까지 유지됩니다. 설정 파일에 영구
 | `accept-edits` | 자동 허용 | 자동 허용 | 매번 승인 |
 | `yolo` | 자동 허용 | 자동 허용 | 자동 허용 |
 
-현재 도구 목록은 `bash`, `read_file`, `write_file`, `edit_file`, `glob`, `grep`,
+현재 도구 목록은 `bash`, `read_file`, `write_file`, `edit_file`, `list_dir`,
+`delete_file`, `move_file`, `glob`, `grep`,
 `todo_write`, `git`, `web_fetch`, `ask_question`, `task`, `project_docs`,
-`skill`, `mcp_manage`, `list_mcp_tools`, `call_mcp_tool`입니다. `ask` 모드에서 승인하지 않은 도구 호출도 모델 대화에는
+`research`, `skill`, `mcp_manage`, `list_mcp_tools`, `call_mcp_tool`입니다. `ask` 모드에서 승인하지 않은 도구 호출도 모델 대화에는
 `denied` 결과로 기록되어 에이전트가 다음 응답에서 처리할 수 있습니다.
 
 권한은 다음 방법으로 변경할 수 있습니다.
@@ -135,8 +136,8 @@ Agent profile은 `.opencode/agents/*.md`, `.cheapai/agents/*.md`,
 |------|------|
 | `/help` | 명령 목록 표시 |
 | `/status` | 인증, 모델, 세션, workspace와 runtime 정보 표시 |
-| `/usage`, `/stats` | 현재 세션 토큰·비용과 계정 사용액 표시 |
-| `/credits [on|off]` | 서버에서 계정 잔액·키 사용량 표시 또는 header 잔액 표시 설정 |
+| `/usage`, `/stats` | 현재 세션 토큰과 플랜 사용량 표시 |
+| `/credits [on|off]` | 서버에서 플랜 사용량·추가 크레딧 표시 또는 header 표시 설정 |
 | `/compact` | 이전 대화를 모델 요약으로 축약하고 최신 exchange 유지 |
 | `/undo`, `/revert` | 마지막 turn 제거 및 추적 가능한 파일 변경 복원 |
 | `/redo`, `/unrevert` | 마지막 undo의 대화와 추적 파일 변경 재적용 |
@@ -250,7 +251,7 @@ src/ui/input.js        masked secret input
 src/agent/loop.js      기존 runAgentLoop API를 유지하는 compatibility facade
 src/agent/runtime.js   event stream, queues, budgets, tool lifecycle
 src/agent/events.js    monotonic runtime event envelope
-src/agent/usage.js     token/cost 집계, context 추정과 usage 표시 형식
+src/agent/usage.js     token 집계, 플랜 사용량 표시, context 추정
 src/agent/compact.js   대화 요약과 context compaction
 src/agent/export.js    Markdown transcript export
 src/agent/history.js   turn checkpoint, 파일 snapshot, undo/redo

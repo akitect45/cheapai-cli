@@ -11,6 +11,8 @@ import {
   installLatestVersion,
   isNewerVersion,
   npmInstallArgs,
+  resolveNpmInvocation,
+  safePackageVersion,
 } from '../src/update.js';
 
 const require = createRequire(import.meta.url);
@@ -62,6 +64,50 @@ test('checkForUpdate times out instead of hanging on a stuck registry body', asy
   assert.equal(info, null);
   assert.ok(Date.now() - started < 1500, `update check hung for ${Date.now() - started}ms`);
 }));
+
+test('resolveNpmInvocation uses Node-adjacent npm-cli.js, not cwd npm.cmd', () => {
+  const nodeDir = path.join(os.tmpdir(), 'nodejs-install');
+  const execPath = path.join(nodeDir, 'node.exe');
+  const cli = path.join(nodeDir, 'node_modules', 'npm', 'bin', 'npm-cli.js');
+  const resolved = resolveNpmInvocation({
+    platform: 'win32',
+    execPath,
+    existsSync: (filePath) => filePath === cli,
+  });
+  assert.equal(resolved.command, execPath);
+  assert.deepEqual(resolved.argsPrefix, [cli]);
+  assert.equal(resolved.cwd, nodeDir);
+});
+
+test('resolveNpmInvocation falls back to sibling npm.cmd', () => {
+  const nodeDir = 'C:\\Program Files\\nodejs';
+  const execPath = path.join(nodeDir, 'node.exe');
+  const npmCmd = path.join(nodeDir, 'npm.cmd');
+  const resolved = resolveNpmInvocation({
+    platform: 'win32',
+    execPath,
+    existsSync: (filePath) => filePath === npmCmd,
+  });
+  assert.equal(resolved.command, npmCmd);
+  assert.deepEqual(resolved.argsPrefix, []);
+});
+
+test('resolveNpmInvocation fails closed when only a home-folder npm exists', () => {
+  assert.throws(
+    () => resolveNpmInvocation({
+      platform: 'win32',
+      execPath: 'C:\\Program Files\\nodejs\\node.exe',
+      existsSync: () => false,
+    }),
+    /Cannot find npm/,
+  );
+});
+
+test('npm install args reject unsafe registry versions', () => {
+  assert.deepEqual(npmInstallArgs('9.9.9')[2], '@akitect/cheapai@9.9.9');
+  assert.throws(() => safePackageVersion('1.0.0"; calc'), /버전/);
+  assert.throws(() => npmInstallArgs('1.0.0 & whoami'), /버전/);
+});
 
 test('installLatestVersion runs a global npm install only when newer', async () => withHome(async () => {
   const installs = [];

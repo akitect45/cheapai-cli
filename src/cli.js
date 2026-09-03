@@ -28,6 +28,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { loadCustomAgents } from './agent/commands.js';
 import { checkForUpdate, installLatestVersion } from './update.js';
+import { dispatchResearch } from './research/index.js';
 
 function configureStdio() {
   try {
@@ -49,7 +50,7 @@ export async function main(argv = process.argv) {
     || args.includes('--json')
     || args.includes('--print')
     || args.includes('-p')
-    || ['login', 'logout', 'whoami', 'models', 'usage', 'stats', 'session', 'agent', 'export', 'import', 'credits', 'config', 'dashboard'].includes(command);
+    || ['login', 'logout', 'whoami', 'models', 'usage', 'stats', 'session', 'agent', 'export', 'import', 'credits', 'config', 'dashboard', 'research'].includes(command);
   if (args.includes('--update')) {
     console.log('Checking for updates...');
     const result = await installLatestVersion();
@@ -182,7 +183,7 @@ export async function main(argv = process.argv) {
 
   program
     .command('usage')
-    .description('Show account credits and recent API usage')
+    .description('Show plan usage, extra credits, and recent API usage')
     .option('--json', 'Print raw JSON', false)
     .action(async (opts) => printAccountUsage(opts));
 
@@ -249,7 +250,7 @@ export async function main(argv = process.argv) {
 
   program
     .command('credits')
-    .description('Show remaining CheapAI credits')
+    .description('Show remaining plan usage and extra credits')
     .option('--json', 'Print raw JSON', false)
     .action(async (opts) => printAccountUsage(opts));
 
@@ -279,7 +280,80 @@ export async function main(argv = process.argv) {
     openBrowser(`${(loadConfig().webOrigin || DEFAULT_WEB_ORIGIN).replace(/\/$/, '')}/api/dashboard`);
   });
 
+  const researchCommand = program.command('research').description('Workspace METRIC/ASI research harness');
+  researchCommand
+    .command('init')
+    .description('Create a workspace experiment under .cheapai/autoresearch')
+    .option('--goal <text>', 'Research question')
+    .option('--name <name>', 'Experiment name')
+    .option('--metric <name>', 'Primary METRIC name', 'metric')
+    .option('--direction <dir>', 'lower or higher', 'lower')
+    .option('--cmd <command>', 'Preferred harness command')
+    .option('--cwd <dir>', 'Workspace')
+    .action(async (opts, command) => {
+      await printResearch({
+        action: 'init',
+        cwd: workspaceFromCommand(opts, command),
+        goal: opts.goal,
+        name: opts.name,
+        primaryMetric: opts.metric,
+        direction: opts.direction,
+        command: opts.cmd,
+      });
+    });
+  researchCommand
+    .command('run')
+    .description('Run the harness command and append a keep/discard record')
+    .option('--cmd <command>', 'Override the experiment command')
+    .option('--description <text>', 'Note stored on the run')
+    .option('--timeout-ms <n>', 'Timeout in milliseconds', (value) => Number(value))
+    .option('--cwd <dir>', 'Workspace')
+    .action(async (opts, command) => {
+      await printResearch({
+        action: 'run',
+        cwd: workspaceFromCommand(opts, command),
+        command: opts.cmd,
+        description: opts.description,
+        timeoutMs: opts.timeoutMs,
+      });
+    });
+  researchCommand
+    .command('status')
+    .description('Show the current experiment and recent runs')
+    .option('--cwd <dir>', 'Workspace')
+    .action(async (opts, command) => printResearch({ action: 'status', cwd: workspaceFromCommand(opts, command) }));
+  researchCommand
+    .command('flag <runId>')
+    .description('Exclude a suspect run from baseline/best math')
+    .option('--reason <text>', 'Why the run is invalid')
+    .option('--cwd <dir>', 'Workspace')
+    .action(async (runId, opts, command) => {
+      await printResearch({ action: 'flag', cwd: workspaceFromCommand(opts, command), runId, reason: opts.reason });
+    });
+  researchCommand
+    .command('clear')
+    .description('Delete the workspace experiment and run ledger')
+    .option('--cwd <dir>', 'Workspace')
+    .action(async (opts, command) => printResearch({ action: 'clear', cwd: workspaceFromCommand(opts, command) }));
+
   await program.parseAsync(argv);
+}
+
+function workspaceFromCommand(opts, command) {
+  if (opts?.cwd) return path.resolve(opts.cwd);
+  let current = command;
+  while (current) {
+    const value = current.opts?.().cwd;
+    if (value) return path.resolve(value);
+    current = current.parent;
+  }
+  return process.cwd();
+}
+
+async function printResearch(input) {
+  const result = await dispatchResearch(input);
+  console.log(JSON.stringify(result, null, 2));
+  if (!result.ok) process.exitCode = 1;
 }
 
 async function printAccountUsage(opts = {}) {
@@ -290,9 +364,9 @@ async function printAccountUsage(opts = {}) {
       console.log(JSON.stringify(usage, null, 2));
       return;
     }
-    console.log('CheapAI usage');
+    console.log('CheapAI plan usage');
     for (const [key, value] of accountUsageRows(usage)) {
-      console.log(`  ${String(key).padEnd(14)} ${value}`);
+      console.log(`  ${String(key).padEnd(16)} ${value}`);
     }
   } catch (error) {
     console.error('✗', error.message || error);
@@ -356,7 +430,6 @@ function printLocalStats(opts = {}) {
   console.log(`  messages       ${stats.messages}`);
   console.log(`  tokens         ${stats.totalTokens.toLocaleString()}`);
   console.log(`  input / output ${stats.inputTokens.toLocaleString()} / ${stats.outputTokens.toLocaleString()}`);
-  console.log(`  billed         ₩${stats.credits.toLocaleString()}`);
   console.log(`  compactions    ${stats.compactions}`);
   const models = Object.entries(stats.models).sort((a, b) => b[1] - a[1]);
   if (models.length) console.log(`  models         ${models.map(([name, count]) => `${name} ${count}`).join(', ')}`);

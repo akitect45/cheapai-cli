@@ -14,6 +14,9 @@ export async function fetchUrl(url, { fetchImpl = globalThis.fetch, userAgent = 
   if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
     return { error: 'Only http and https URLs can be fetched on this machine.' };
   }
+  if (isBlockedHost(parsed.hostname)) {
+    return { error: 'Local and private network URLs cannot be fetched.' };
+  }
 
   let response;
   try {
@@ -38,6 +41,9 @@ export async function fetchUrl(url, { fetchImpl = globalThis.fetch, userAgent = 
   }
   if (finalParsed.protocol !== 'http:' && finalParsed.protocol !== 'https:') {
     return { error: 'Redirected to a non-http URL.' };
+  }
+  if (isBlockedHost(finalParsed.hostname)) {
+    return { error: 'Redirected to a local or private network URL.' };
   }
 
   const status = Number(response.status) || 0;
@@ -184,4 +190,22 @@ function collapseBlankLines(text) {
 
 function takeChars(text, max) {
   return [...String(text)].slice(0, max).join('');
+}
+
+export function isBlockedHost(hostname) {
+  const host = String(hostname || '').trim().toLowerCase().replace(/^\[|\]$/g, '');
+  if (!host) return true;
+  if (host === 'localhost' || host.endsWith('.localhost') || host === '0.0.0.0' || host === '::' || host === '::1') {
+    return true;
+  }
+  if (host.startsWith('fe80:') || host.startsWith('fc') || host.startsWith('fd')) return true;
+  const ipv4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!ipv4) return false;
+  const parts = ipv4.slice(1).map((part) => Number(part));
+  if (parts.some((part) => part > 255)) return false;
+  const [a, b] = parts;
+  return a === 0 || a === 10 || a === 127
+    || (a === 169 && b === 254)
+    || (a === 172 && b >= 16 && b <= 31)
+    || (a === 192 && b === 168);
 }

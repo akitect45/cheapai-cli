@@ -69,6 +69,8 @@ test('skill CRUD writes SKILL.md and skips disabled discovery', () => withHome((
   assert.equal(discoverSkills(root, { includeDisabled: true }).some((skill) => skill.name === 'review-notes'), true);
   assert.equal(isSkillMutating('list'), false);
   assert.equal(isSkillMutating('create'), true);
+  const listed = manageSkill({ action: 'list' }, root);
+  assert.equal(listed.skills.some((skill) => skill.name === 'frontend-design' && skill.source === 'bundled'), true);
 }));
 
 test('mcp catalog and mutate flags', async () => {
@@ -89,7 +91,10 @@ test('subagent title and parent-only tools stay out of child runtime', () => wit
   assert.equal(runtime.registry.get('task') == null, true);
   assert.equal(runtime.registry.get('ask_question') == null, true);
   assert.equal(runtime.registry.get('web_fetch') != null, true);
+  assert.equal(runtime.registry.get('list_dir') != null, true);
+  assert.equal(runtime.registry.get('delete_file') != null, true);
   assert.equal(GOAL_TOOL_NAMES.has('ask_question'), true);
+  assert.equal(GOAL_TOOL_NAMES.has('list_dir'), true);
   assert.equal(GOAL_TOOL_NAMES.has('task'), false);
 }));
 

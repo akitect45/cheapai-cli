@@ -18,7 +18,7 @@ export function createClient(overrides = {}) {
   const baseURL = overrides.baseUrl || resolveBaseUrl(cfg, auth);
   const wireApi = resolveWireApi(overrides.wireApi, cfg);
   const providerId = wireApi === 'responses-ws' ? 'openai-responses-ws' : 'openai-compatible';
-  const client = new OpenAI({ apiKey, baseURL, maxRetries: 0, defaultHeaders: { 'User-Agent': 'CheapAI-CLI/0.3' } });
+  const client = new OpenAI({ apiKey, baseURL, maxRetries: 0, defaultHeaders: { 'User-Agent': 'CheapAI-CLI/0.4' } });
   client[CHEAPAI_CLIENT_META] = { baseURL, apiKey, wireApi, providerId };
   return {
     client,
@@ -98,7 +98,7 @@ export async function fetchAccountUsage({ baseURL, apiKey } = {}) {
     headers: {
       Accept: 'application/json',
       Authorization: `Bearer ${key}`,
-      'User-Agent': 'CheapAI-CLI/0.3',
+      'User-Agent': 'CheapAI-CLI/0.4',
     },
   });
   const body = await res.json().catch(() => ({}));

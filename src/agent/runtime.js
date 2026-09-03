@@ -18,6 +18,7 @@ import { runAskQuestion } from './ask-question.js';
 import { runSubagent } from './subagent.js';
 import { createMcpManager } from './mcp.js';
 import { looksLarge, listMarkdownDocs } from './project-docs.js';
+import { serializeToolResult } from './tool-result.js';
 
 function yieldToEventLoop() {
   return new Promise((resolve) => {
@@ -297,7 +298,7 @@ export function createAgentRuntime(options = {}) {
               session.messages.push({
                 role: 'tool',
                 tool_call_id: item.call.id,
-                content: JSON.stringify(item.result).slice(0, 80_000),
+                content: serializeToolResult(item.result),
               });
             }
             saveSession(session);

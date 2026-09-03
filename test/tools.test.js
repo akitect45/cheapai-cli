@@ -88,6 +88,9 @@ test('web_fetch rejects non-http URLs and extracts HTML', async () => {
   assert.equal(htmlTitle('<title>이전 작업</title>'), '이전 작업');
   assert.match(htmlTitle(`<html><head><title>${'이전작업'.repeat(40)}`), /이전/);
   assert.match(htmlToText('<p>Hello &amp; <b>world</b></p>'), /Hello & world/);
+  const local = await fetchUrl('http://127.0.0.1/secret');
+  assert.match(String(local.error), /private|local/i);
+
   const fetched = await fetchUrl('https://example.com/docs', {
     fetchImpl: async () => ({
       status: 200,
@@ -120,6 +123,91 @@ test('git tool inspects and commits inside the workspace only', async () => {
   });
 });
 
+test('list_dir delete_file and move_file stay inside the workspace', async () => withWorkspace(async (root) => {
+  const runtime = createToolRuntime({ cwd: root });
+  fs.writeFileSync(path.join(root, 'keep.txt'), 'keep\n');
+  fs.writeFileSync(path.join(root, 'gone.txt'), 'gone\n');
+  const listed = await runtime.execute('list_dir', {});
+  assert.equal(listed.entries.some((entry) => entry.name === 'keep.txt' && entry.type === 'file'), true);
+
+  const moved = await runtime.execute('move_file', { from: 'keep.txt', to: 'nested/keep.txt' });
+  assert.equal(moved.ok, true);
+  assert.equal(fs.existsSync(path.join(root, 'keep.txt')), false);
+  assert.equal(fs.readFileSync(path.join(root, 'nested', 'keep.txt'), 'utf8'), 'keep\n');
+
+  const deleted = await runtime.execute('delete_file', { path: 'gone.txt' });
+  assert.equal(deleted.ok, true);
+  assert.equal(fs.existsSync(path.join(root, 'gone.txt')), false);
+
+  const blocked = await runtime.execute('delete_file', { path: '../outside.txt' });
+  assert.equal(blocked.code, 'path_outside_workspace');
+}));
+
+test('edit_file applies multi-hunk edits and diagnoses misses', async () => withWorkspace(async (root) => {
+  const runtime = createToolRuntime({ cwd: root });
+  fs.writeFileSync(path.join(root, 'crlf.js'), 'function greet() {\r\n  return "hi";\r\n}\r\n');
+  const crlf = await runtime.execute('edit_file', {
+    path: 'crlf.js',
+    old_string: 'function greet() {\n  return "hi";\n}',
+    new_string: 'function greet() {\n  return "hello";\n}',
+  });
+  assert.equal(crlf.ok, true);
+  assert.match(fs.readFileSync(path.join(root, 'crlf.js'), 'utf8'), /hello/);
+
+  fs.writeFileSync(path.join(root, 'multi.js'), 'const a = 1;\nconst b = 2;\n');
+  const multi = await runtime.execute('edit_file', {
+    path: 'multi.js',
+    edits: [
+      { old_string: 'const a = 1;', new_string: 'const a = 10;' },
+      { old_string: 'const b = 2;', new_string: 'const b = 20;' },
+    ],
+  });
+  assert.equal(multi.ok, true);
+  assert.equal(multi.replacements, 2);
+  assert.equal(fs.readFileSync(path.join(root, 'multi.js'), 'utf8'), 'const a = 10;\nconst b = 20;\n');
+
+  const missed = await runtime.execute('edit_file', {
+    path: 'multi.js',
+    old_string: 'const missing = true;',
+    new_string: 'const missing = false;',
+  });
+  assert.match(String(missed.error), /not found/i);
+  assert.equal(Array.isArray(missed.similar), true);
+}));
+
+test('read_file rejects binaries and grep supports literal context', async () => withWorkspace(async (root) => {
+  const runtime = createToolRuntime({ cwd: root });
+  fs.writeFileSync(path.join(root, 'note.txt'), 'alpha\nfoo(bar)\nbeta\n');
+  fs.writeFileSync(path.join(root, 'blob.bin'), Buffer.from([0, 1, 2, 3, 4]));
+  const binary = await runtime.execute('read_file', { path: 'blob.bin' });
+  assert.match(String(binary.error), /Binary/);
+
+  const grep = await runtime.execute('grep', {
+    pattern: 'foo(bar)',
+    path: root,
+    fixed_string: true,
+    context: 1,
+  });
+  assert.equal(grep.matches.length, 1);
+  assert.deepEqual(grep.matches[0].before, ['alpha']);
+  assert.deepEqual(grep.matches[0].after, ['beta']);
+}));
+
+test('research tool records a METRIC keep on the workspace ledger', async () => withWorkspace(async (root) => {
+  const runtime = createToolRuntime({ cwd: root });
+  const init = await runtime.execute('research', {
+    action: 'init',
+    goal: 'echo metric',
+    primaryMetric: 'latency_ms',
+    command: `"${process.execPath}" -e "console.log('METRIC latency_ms=3')"`,
+  });
+  assert.equal(init.ok, true);
+  const ran = await runtime.execute('research', { action: 'run' });
+  assert.equal(ran.evidence.run.status, 'keep');
+  assert.equal(ran.state.best, 3);
+  assert.equal(fs.existsSync(path.join(root, '.cheapai', 'autoresearch', 'runs.jsonl')), true);
+}));
+
 test('permission gate allows git inspect and web_fetch without a prompt', () => {
   const ask = createPermissionGate('ask');
   assert.equal(ask.requiresApproval('web_fetch', { url: 'https://example.com' }), false);
@@ -131,10 +219,18 @@ test('permission gate allows git inspect and web_fetch without a prompt', () => 
   assert.equal(ask.requiresApproval('list_mcp_tools'), false);
   assert.equal(ask.requiresApproval('skill', { action: 'list' }), false);
   assert.equal(ask.requiresApproval('skill', { action: 'create' }), true);
+  assert.equal(ask.requiresApproval('research', { action: 'status' }), false);
+  assert.equal(ask.requiresApproval('research', { action: 'run' }), true);
   assert.equal(ask.requiresApproval('mcp_manage', { action: 'list' }), false);
   assert.equal(ask.requiresApproval('mcp_manage', { action: 'connect' }), true);
   assert.equal(ask.requiresApproval('call_mcp_tool'), true);
   assert.equal(ask.requiresApproval('bash'), true);
+  assert.equal(ask.requiresApproval('list_dir'), false);
+  assert.equal(ask.requiresApproval('delete_file'), true);
+  const edits = createPermissionGate('accept-edits');
+  assert.equal(edits.requiresApproval('move_file'), false);
+  assert.equal(edits.requiresApproval('delete_file'), false);
+  assert.equal(edits.requiresApproval('bash'), true);
 });
 
 function withWorkspace(callback) {

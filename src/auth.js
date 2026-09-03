@@ -315,22 +315,21 @@ export async function loginWithApiKey(apiKey, { baseUrl, username, keyName } = {
   }
   const base = (baseUrl || resolveBaseUrl(loadConfig(), loadAuth()) || DEFAULT_BASE_URL).replace(/\/$/, '');
 
-  // Prefer a lightweight auth check; models list may be public
-  let validated = false;
+  let response;
   try {
-    const res = await fetch(`${base}/models`, {
+    response = await fetch(`${base}/models`, {
       headers: { Authorization: `Bearer ${key}` },
     });
-    if (res.status === 401) {
-      throw new Error('API 키가 유효하지 않습니다 (401).');
-    }
-    // 200 or even 402/etc still means key was accepted enough
-    validated = res.status !== 401;
-  } catch (e) {
-    if (String(e.message).includes('401')) throw e;
-    // network — still save key; user can retry
-    logDebug('models check skipped', e.message);
-    validated = true;
+  } catch (error) {
+    logDebug('models check failed', error.message);
+    throw new Error('API 키를 확인할 수 없습니다. 네트워크를 확인하세요.');
+  }
+  const status = response.status;
+  if (status === 401 || status === 403) {
+    throw new Error('API 키가 유효하지 않습니다.');
+  }
+  if (!response.ok) {
+    throw new Error(`API 키 확인에 실패했습니다 (${status}).`);
   }
 
   const auth = {
@@ -340,7 +339,7 @@ export async function loginWithApiKey(apiKey, { baseUrl, username, keyName } = {
     baseUrl: base,
     webOrigin: loadConfig().webOrigin || DEFAULT_WEB_ORIGIN,
     createdAt: new Date().toISOString(),
-    validated,
+    validated: true,
   };
   saveAuth(auth);
   return auth;
